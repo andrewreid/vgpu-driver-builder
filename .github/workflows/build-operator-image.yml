@@ -22,13 +22,14 @@ jobs:
         shell: bash
         run: |
           calver="$(date -u +'%Y.%m').${GITHUB_RUN_NUMBER}"
-          image_name="$(echo "${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')"
+          owner="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
+          image_name="ghcr.io/${owner}/vgpu-driver-operator"
 
           {
             echo "calver=${calver}"
             echo "release_tag=v${calver}"
             echo "release_name=${calver}"
-            echo "image_name=vgpu-driver-operator"
+            echo "image_name=${image_name}"
           } >> "${GITHUB_OUTPUT}"
 
       - name: Set up Docker Buildx
@@ -45,7 +46,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v6
         with:
-          images: ghcr.io/${{ steps.version.outputs.image_name }}
+          images: ${{ steps.version.outputs.image_name }}
           tags: |
             type=raw,value=${{ steps.version.outputs.release_tag }}
             type=raw,value=${{ steps.version.outputs.calver }}
