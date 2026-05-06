@@ -12,7 +12,10 @@ poll-flatcar
 from __future__ import annotations
 
 import argparse
+import http.server
 import sys
+import threading
+import urllib.parse
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -30,6 +33,16 @@ def main(argv: list[str] | None = None) -> int:
     controller_p = sub.add_parser(
         "controller",
         help="Run the kopf operator controller (default).",
+    )
+    controller_p.add_argument(
+        "--liveness",
+        metavar="URL",
+        default=None,
+        help=(
+            "Start an HTTP health server at this URL "
+            "(e.g. http://0.0.0.0:8080/healthz). "
+            "Responds 200 on the configured path, 404 otherwise."
+        ),
     )
 
     # poll-flatcar subcommand
@@ -51,7 +64,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # Default to 'controller' when no subcommand is given.
     if args.subcommand is None or args.subcommand == "controller":
-        return _run_controller()
+        return _run_controller(liveness_url=getattr(args, "liveness", None))
 
     if args.subcommand == "poll-flatcar":
         return _run_poll_flatcar(dry_run=getattr(args, "dry_run", False))
@@ -60,8 +73,36 @@ def main(argv: list[str] | None = None) -> int:
     return 1
 
 
-def _run_controller() -> int:
+def _start_health_server(url: str) -> None:
+    """Parse *url* and start a daemon HTTP health server thread."""
+    parsed = urllib.parse.urlparse(url)
+    host = parsed.hostname or "0.0.0.0"
+    port = parsed.port or 8080
+    health_path = parsed.path or "/healthz"
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802
+            if self.path == health_path:
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"ok")
+            else:
+                self.send_response(404)
+                self.end_headers()
+
+        def log_message(self, *_: object) -> None:
+            pass  # silence access log noise
+
+    server = http.server.ThreadingHTTPServer((host, port), _Handler)
+    t = threading.Thread(target=server.serve_forever, daemon=True)
+    t.start()
+
+
+def _run_controller(liveness_url: str | None = None) -> int:
     """Start the kopf operator.  Blocks until the process is terminated."""
+    if liveness_url:
+        _start_health_server(liveness_url)
+
     # Import main here so kopf decorators register before kopf.run() is called.
     import vgpu_driver_operator.main  # noqa: F401  (side-effect: registers handlers)
     import kopf  # type: ignore[import-untyped]
