@@ -43,6 +43,7 @@ htmlcov/
 .DS_Store
 *.sublime-project
 *.sublime-workspace
+.codex/
 
 # OS
 .DS_Store
