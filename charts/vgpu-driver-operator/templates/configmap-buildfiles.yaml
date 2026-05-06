@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Values.buildAssets.configMapName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "vgpu-driver-operator.labels" . | nindent 4 }}
+data:
+  Dockerfile: |
+    {{- (.Files.Get "files/build/Dockerfile") | nindent 4 }}
+  Dockerfile.prebuilt: |
+    {{- (.Files.Get "files/build/Dockerfile.prebuilt") | nindent 4 }}
+  nvidia-driver: |
+    {{- (.Files.Get "files/build/nvidia-driver") | nindent 4 }}

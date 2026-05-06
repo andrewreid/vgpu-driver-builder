@@ -1,0 +1,293 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: vgpudriverimages.vgpu.flatcar.io
+spec:
+  group: vgpu.flatcar.io
+  names:
+    plural: vgpudriverimages
+    singular: vgpudriverimage
+    kind: VGPUDriverImage
+    shortNames:
+      - vdi
+  scope: Cluster
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Phase
+          type: string
+          jsonPath: .status.conditions[?(@.type=="Reconciled")].status
+        - name: Drivers
+          type: string
+          jsonPath: .spec.driverVersions
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              required:
+                - driverVersions
+                - source
+                - registry
+              properties:
+                driverVersions:
+                  description: List of NVIDIA vGPU driver versions to build images for.
+                  type: array
+                  minItems: 1
+                  items:
+                    type: string
+
+                source:
+                  description: Source configuration for driver binary assets.
+                  type: object
+                  required:
+                    - type
+                    - uriTemplate
+                  properties:
+                    type:
+                      description: Protocol used to fetch driver assets.
+                      type: string
+                      enum:
+                        - s3
+                        - http
+                    uriTemplate:
+                      description: >
+                        URI template for locating driver assets. Supported
+                        placeholders: {driverVersion}, {flatcarVersion}, {arch}.
+                      type: string
+                    credentialsSecretRef:
+                      description: Reference to a Secret containing source credentials.
+                      type: object
+                      required:
+                        - name
+                      properties:
+                        name:
+                          description: Name of the Secret in the same namespace as the operator.
+                          type: string
+
+                registry:
+                  description: Target OCI registry configuration.
+                  type: object
+                  required:
+                    - repository
+                  properties:
+                    repository:
+                      description: OCI repository for compiled driver images.
+                      type: string
+                    repositoryPrecompiled:
+                      description: OCI repository for precompiled (pre-built) driver images.
+                      type: string
+                    cacheRepository:
+                      description: OCI repository used as a BuildKit cache source/destination.
+                      type: string
+                    authSecretRef:
+                      description: Reference to a docker-config Secret for registry authentication.
+                      type: object
+                      required:
+                        - name
+                      properties:
+                        name:
+                          description: Name of the Secret containing registry credentials.
+                          type: string
+
+                flatcar:
+                  description: Flatcar Linux node discovery and channel tracking settings.
+                  type: object
+                  properties:
+                    discoverFromNodes:
+                      description: >
+                        When true, the operator watches cluster nodes to discover
+                        in-use Flatcar versions automatically.
+                      type: boolean
+                      default: true
+                    nodeSelector:
+                      description: >
+                        Label selector used to filter nodes when discoverFromNodes
+                        is true.
+                      type: object
+                      additionalProperties:
+                        type: string
+                    trackChannels:
+                      description: Flatcar release channels to track for new versions.
+                      type: array
+                      items:
+                        type: string
+                        enum:
+                          - stable
+                          - lts
+                          - beta
+                          - alpha
+                    arch:
+                      description: CPU architecture for Flatcar release lookups.
+                      type: string
+                      default: amd64
+
+                precompile:
+                  description: >
+                    When true, also build precompiled (DKMS-free) driver images using
+                    Dockerfile.prebuilt.
+                  type: boolean
+                  default: false
+
+                retention:
+                  description: Garbage-collection policy for old driver images.
+                  type: object
+                  properties:
+                    keepPreviousFlatcarVersions:
+                      description: >
+                        Number of previous Flatcar versions to retain per driver
+                        version (0 = keep none beyond currently active).
+                      type: integer
+                      minimum: 0
+                      default: 0
+                    minAgeBeforeDelete:
+                      description: >
+                        Minimum age a tag must reach before the GC is allowed to
+                        delete it (Go duration string).
+                      type: string
+                      default: "168h"
+                    enabled:
+                      description: Enable automatic garbage collection.
+                      type: boolean
+                      default: false
+
+                build:
+                  description: Build Job configuration overrides.
+                  type: object
+                  properties:
+                    buildkitImage:
+                      description: BuildKit image used for rootless builds.
+                      type: string
+                      default: "moby/buildkit:rootless"
+                    resources:
+                      description: Resource requirements for build Job containers.
+                      type: object
+                      x-kubernetes-preserve-unknown-fields: true
+                    nodeSelector:
+                      description: Node selector applied to build Job pods.
+                      type: object
+                      additionalProperties:
+                        type: string
+                    tolerations:
+                      description: Tolerations applied to build Job pods.
+                      type: array
+                      items:
+                        type: object
+                        x-kubernetes-preserve-unknown-fields: true
+
+            status:
+              type: object
+              properties:
+                observedNodes:
+                  description: Flatcar versions currently observed across cluster nodes.
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      flatcarVersion:
+                        type: string
+                      kernelVersion:
+                        type: string
+                      nodeCount:
+                        type: integer
+
+                trackedChannelVersions:
+                  description: Latest release for each tracked Flatcar channel.
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      channel:
+                        type: string
+                      flatcarVersion:
+                        type: string
+                      kernelVersion:
+                        type: string
+                      observedAt:
+                        type: string
+                        format: date-time
+
+                retainedFlatcarVersions:
+                  description: Flatcar versions currently retained by the GC policy.
+                  type: array
+                  items:
+                    type: string
+
+                pruned:
+                  description: Record of tags pruned by the garbage collector.
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      tag:
+                        type: string
+                      reason:
+                        type: string
+                      prunedAt:
+                        type: string
+                        format: date-time
+
+                builds:
+                  description: Per-combination build status entries.
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      driverVersion:
+                        type: string
+                      flatcarVersion:
+                        type: string
+                      kernelVersion:
+                        type: string
+                      mode:
+                        type: string
+                        enum:
+                          - compiled
+                          - precompiled
+                      tag:
+                        type: string
+                      phase:
+                        type: string
+                      jobName:
+                        type: string
+                      lastTransitionTime:
+                        type: string
+                        format: date-time
+                      message:
+                        type: string
+
+                conditions:
+                  description: Standard Kubernetes condition array.
+                  type: array
+                  items:
+                    type: object
+                    required:
+                      - type
+                      - status
+                    properties:
+                      type:
+                        type: string
+                      status:
+                        type: string
+                        enum:
+                          - "True"
+                          - "False"
+                          - Unknown
+                      reason:
+                        type: string
+                      message:
+                        type: string
+                      lastTransitionTime:
+                        type: string
+                        format: date-time
+                      observedGeneration:
+                        type: integer
+                        format: int64

@@ -1,0 +1,168 @@
+{
+  "apiVersion": "batch/v1",
+  "kind": "Job",
+  "metadata": {
+    "labels": {
+      "app": "vgpu-driver-builder",
+      "app.kubernetes.io/component": "builder",
+      "vgpu.flatcar.io/driver-version": "550.54.15",
+      "vgpu.flatcar.io/flatcar-version": "4230.2.3",
+      "vgpu.flatcar.io/mode": "runtime",
+      "vgpu.flatcar.io/owner-uid": "abc-123-uid"
+    },
+    "name": "vgpu-build-runtime-550-54-15-fc-4230-2-3-5e8fad",
+    "namespace": "vgpu-system",
+    "ownerReferences": [
+      {
+        "apiVersion": "vgpu.flatcar.io/v1alpha1",
+        "blockOwnerDeletion": true,
+        "controller": true,
+        "kind": "VGPUDriverImage",
+        "name": "my-vdi",
+        "uid": "abc-123-uid"
+      }
+    ]
+  },
+  "spec": {
+    "backoffLimit": 0,
+    "template": {
+      "metadata": {
+        "labels": {
+          "app": "vgpu-driver-builder",
+          "app.kubernetes.io/component": "builder",
+          "vgpu.flatcar.io/driver-version": "550.54.15",
+          "vgpu.flatcar.io/flatcar-version": "4230.2.3",
+          "vgpu.flatcar.io/mode": "runtime",
+          "vgpu.flatcar.io/owner-uid": "abc-123-uid"
+        }
+      },
+      "spec": {
+        "containers": [
+          {
+            "command": [
+              "/bin/sh",
+              "-c",
+              "if [ -f /kaniko/.docker/config.json ]; then\n  export DOCKER_CONFIG=/kaniko/.docker\nfi\nexport BUILDKITD_FLAGS=\"--oci-worker-no-process-sandbox\"\nbuildctl-daemonless.sh build \\\n  --progress=plain \\\n  --frontend=dockerfile.v0 \\\n  --local context=/workspace \\\n  --local dockerfile=/workspace \\\n  --import-cache type=registry,ref=registry.example.com/cache/vgpu-driver:shared \\\n  --export-cache type=registry,ref=registry.example.com/cache/vgpu-driver:shared,mode=max \\\n  --opt build-arg:FLATCAR_VERSION=4230.2.3 \\\n  --opt build-arg:DRIVER_VERSION=550.54.15 \\\n  --opt build-arg:GIT_REVISION=deadbeef \\\n  --opt build-arg:BUILD_CREATED=2025-01-10T12:00:00Z \\\n  --output type=image,name=registry.example.com/vgpu-driver:550.54.15-flatcar4230.2.3,push=true"
+            ],
+            "image": "moby/buildkit:rootless",
+            "name": "buildkit",
+            "volumeMounts": [
+              {
+                "mountPath": "/workspace",
+                "name": "build-context"
+              },
+              {
+                "mountPath": "/workspace/Dockerfile",
+                "name": "dockerfile",
+                "subPath": "Dockerfile"
+              },
+              {
+                "mountPath": "/workspace/nvidia-driver",
+                "name": "build-files",
+                "subPath": "nvidia-driver"
+              },
+              {
+                "mountPath": "/kaniko/.docker/",
+                "name": "docker-config",
+                "readOnly": true
+              }
+            ]
+          }
+        ],
+        "dnsConfig": {
+          "options": [
+            {
+              "name": "ndots",
+              "value": "1"
+            }
+          ]
+        },
+        "initContainers": [
+          {
+            "command": [
+              "/bin/sh",
+              "-c",
+              "aws s3 --endpoint-url $S3_ENDPOINT_URL cp $VGPU_DRIVER_S3_URI /workspace/NVIDIA-Linux-x86_64-550.54.15.run"
+            ],
+            "env": [
+              {
+                "name": "S3_ENDPOINT_URL",
+                "valueFrom": {
+                  "secretKeyRef": {
+                    "key": "S3_ENDPOINT_URL",
+                    "name": "s3-driver-storage-secret"
+                  }
+                }
+              },
+              {
+                "name": "AWS_ACCESS_KEY_ID",
+                "valueFrom": {
+                  "secretKeyRef": {
+                    "key": "AWS_ACCESS_KEY_ID",
+                    "name": "s3-driver-storage-secret"
+                  }
+                }
+              },
+              {
+                "name": "AWS_SECRET_ACCESS_KEY",
+                "valueFrom": {
+                  "secretKeyRef": {
+                    "key": "AWS_SECRET_ACCESS_KEY",
+                    "name": "s3-driver-storage-secret"
+                  }
+                }
+              },
+              {
+                "name": "VGPU_DRIVER_S3_URI",
+                "value": "s3://my-bucket/drivers/NVIDIA-Linux-x86_64-550.54.15.run"
+              },
+              {
+                "name": "DRIVER_VERSION",
+                "value": "550.54.15"
+              }
+            ],
+            "image": "amazon/aws-cli:2.13.0",
+            "name": "fetch-driver",
+            "volumeMounts": [
+              {
+                "mountPath": "/workspace",
+                "name": "build-context"
+              }
+            ]
+          }
+        ],
+        "restartPolicy": "Never",
+        "volumes": [
+          {
+            "emptyDir": {},
+            "name": "build-context"
+          },
+          {
+            "configMap": {
+              "name": "driver-dockerfile-cm"
+            },
+            "name": "dockerfile"
+          },
+          {
+            "configMap": {
+              "name": "driver-build-files"
+            },
+            "name": "build-files"
+          },
+          {
+            "name": "docker-config",
+            "secret": {
+              "items": [
+                {
+                  "key": ".dockerconfigjson",
+                  "path": "config.json"
+                }
+              ],
+              "secretName": "private-registry-secret"
+            }
+          }
+        ]
+      }
+    }
+  }
+}

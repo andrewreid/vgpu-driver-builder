@@ -1,0 +1,58 @@
+{{- if .Values.flatcar.pollEnabled -}}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "vgpu-driver-operator.fullname" . }}-flatcar-poll
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "vgpu-driver-operator.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.flatcar.pollSchedule | quote }}
+  # Prevent overlapping runs if a poll takes longer than the interval
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            {{- include "vgpu-driver-operator.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: flatcar-poller
+        spec:
+          {{- with .Values.imagePullSecrets }}
+          imagePullSecrets:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          serviceAccountName: {{ include "vgpu-driver-operator.serviceAccountName" . }}
+          securityContext:
+            {{- toYaml .Values.podSecurityContext | nindent 12 }}
+          restartPolicy: OnFailure
+          containers:
+            - name: flatcar-poller
+              image: {{ include "vgpu-driver-operator.image" . }}
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              args: ["poll-flatcar"]
+              env:
+                - name: OPERATOR_NAMESPACE
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.namespace
+                - name: KOPF_LOG_LEVEL
+                  value: {{ .Values.kopfLogLevel | default "INFO" | quote }}
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 128Mi
+                limits:
+                  cpu: 200m
+                  memory: 256Mi
+              securityContext:
+                {{- toYaml .Values.securityContext | nindent 16 }}
+              volumeMounts:
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: tmp
+              emptyDir: {}
+{{- end }}

@@ -1,0 +1,103 @@
+# -- Operator container image settings
+image:
+  # -- OCI repository for the operator image
+  repository: ghcr.io/andrewreid/vgpu-driver-operator
+  # -- Image tag; defaults to .Chart.AppVersion when empty
+  tag: ""
+  # -- Kubernetes imagePullPolicy
+  pullPolicy: IfNotPresent
+
+# -- Optional list of image pull secrets for the operator pod
+imagePullSecrets: []
+
+# -- Override the chart name fragment used in resource names
+nameOverride: ""
+
+# -- Override the full resource name (bypasses chart/release name logic)
+fullnameOverride: ""
+
+serviceAccount:
+  # -- Whether to create a dedicated ServiceAccount
+  create: true
+  # -- Annotations to add to the ServiceAccount (e.g. IRSA role ARN)
+  annotations: {}
+  # -- Name of the ServiceAccount; auto-generated from fullname when blank
+  name: ""
+
+# -- Pod-level security context applied to the operator Deployment pod
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+# -- Container-level security context for the operator container
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: true
+
+# -- Resource requests and limits for the operator container
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+# -- Node selector for the operator Deployment pod
+nodeSelector: {}
+
+# -- Tolerations for the operator Deployment pod
+tolerations: []
+
+# -- Affinity rules for the operator Deployment pod
+affinity: {}
+
+# -- Flatcar release-feed poller CronJob settings
+flatcar:
+  # -- Cron schedule for polling Flatcar release feeds
+  pollSchedule: "@hourly"
+  # -- Enable or disable the Flatcar poller CronJob
+  pollEnabled: true
+
+# -- Optional inline S3 secret creation (production should use external-secrets)
+s3:
+  # -- Set to true to create a Secret from the values below
+  create: false
+  # -- Name of the S3 credentials Secret (pre-existing or created by this chart)
+  secretName: s3-driver-storage-secret
+  # -- S3-compatible endpoint URL (e.g. https://s3.amazonaws.com)
+  endpointUrl: ""
+  # -- AWS/S3 access key ID
+  accessKeyId: ""
+  # -- AWS/S3 secret access key
+  secretAccessKey: ""
+
+# -- Optional inline container registry secret creation
+registry:
+  # -- Set to true to create a docker-registry Secret from the values below
+  create: false
+  # -- Name of the registry pull Secret (pre-existing or created by this chart)
+  secretName: private-registry-secret
+  # -- Registry URL (e.g. ghcr.io)
+  url: ""
+  # -- Registry username
+  username: ""
+  # -- Registry password or token
+  password: ""
+
+# -- Log level forwarded to kopf via the KOPF_LOG_LEVEL environment variable
+kopfLogLevel: INFO
+
+# -- Extra arguments appended to the operator container args after the built-in ones
+extraArgs: []
+
+# -- Build asset ConfigMap settings; the ConfigMap is always rendered from
+# -- charts/vgpu-driver-operator/files/build/
+buildAssets:
+  # -- Name of the ConfigMap containing driver build scripts and Dockerfiles
+  configMapName: driver-build-files

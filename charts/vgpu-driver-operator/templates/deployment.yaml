@@ -1,0 +1,99 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "vgpu-driver-operator.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "vgpu-driver-operator.labels" . | nindent 4 }}
+spec:
+  # v0.1.0: single replica. Leader election is out of scope; running multiple
+  # replicas without it would cause duplicate reconciliation loops.
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "vgpu-driver-operator.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "vgpu-driver-operator.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "vgpu-driver-operator.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: operator
+          image: {{ include "vgpu-driver-operator.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # Rely on the image ENTRYPOINT; pass the sub-command and liveness arg.
+          args:
+            - controller
+            - --liveness=http://0.0.0.0:8080/healthz
+            {{- with .Values.extraArgs }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          env:
+            - name: OPERATOR_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: KOPF_LOG_LEVEL
+              value: {{ .Values.kopfLogLevel | default "INFO" | quote }}
+            - name: DOCKERFILE_CONFIGMAP
+              value: {{ .Values.buildAssets.configMapName }}
+            - name: BUILDFILES_CONFIGMAP
+              value: {{ .Values.buildAssets.configMapName }}
+            - name: S3_SECRET_NAME
+              value: {{ .Values.s3.secretName }}
+            - name: REGISTRY_SECRET_NAME
+              value: {{ .Values.registry.secretName }}
+          ports:
+            - name: healthz
+              containerPort: 8080
+              protocol: TCP
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            failureThreshold: 30
+            periodSeconds: 2
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            # /tmp needed for readOnlyRootFilesystem: true (temp files, kopf state)
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
