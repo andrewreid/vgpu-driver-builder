@@ -8,12 +8,10 @@ RUN groupadd --gid 65532 app && \
 
 WORKDIR /app
 
-# Copy and install dependencies first for layer caching
+# Copy source and install
 COPY pyproject.toml ./
-RUN pip install --no-cache-dir .
-
-# Copy source package
 COPY src/ ./src/
+RUN pip install --no-cache-dir .
 
 USER 65532
 
