@@ -28,7 +28,7 @@ jobs:
             echo "calver=${calver}"
             echo "release_tag=v${calver}"
             echo "release_name=${calver}"
-            echo "image_name=${image_name}"
+            echo "vgpu-driver-operator"
           } >> "${GITHUB_OUTPUT}"
 
       - name: Set up Docker Buildx
