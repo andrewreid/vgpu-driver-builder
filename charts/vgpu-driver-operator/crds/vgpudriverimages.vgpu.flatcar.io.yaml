@@ -204,8 +204,6 @@ spec:
                     properties:
                       flatcarVersion:
                         type: string
-                      kernelVersion:
-                        type: string
                       nodeCount:
                         type: integer
 
@@ -218,8 +216,6 @@ spec:
                       channel:
                         type: string
                       flatcarVersion:
-                        type: string
-                      kernelVersion:
                         type: string
                       observedAt:
                         type: string
@@ -254,8 +250,6 @@ spec:
                       driverVersion:
                         type: string
                       flatcarVersion:
-                        type: string
-                      kernelVersion:
                         type: string
                       mode:
                         type: string

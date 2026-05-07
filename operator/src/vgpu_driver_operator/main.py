@@ -282,13 +282,12 @@ def _do_reconcile(
     batch_api = client.BatchV1Api()
     custom_api = client.CustomObjectsApi()
 
-    # --- 1. Collect node pairs ---
+    # --- 1. Collect Flatcar versions from nodes ---
     flatcar_cfg: dict = spec.get("flatcar") or {}
     node_selector: dict = flatcar_cfg.get("nodeSelector") or {}
-    # discoverFromNodes defaults to True for backward-compat but can be disabled.
     discover_from_nodes: bool = flatcar_cfg.get("discoverFromNodes", True)
 
-    node_pairs: set[tuple[str, str]] = set()
+    node_flatcars: set[str] = set()
     observed_nodes: list[dict] = []
 
     if discover_from_nodes:
@@ -300,73 +299,32 @@ def _do_reconcile(
             logger.warning("reconcile: failed to list nodes: %s", exc)
             nodes = []
 
+        flatcar_node_counts: dict[str, int] = {}
         for node in nodes:
             fv = _flatcar.flatcar_version_from_node(node)
-            kv = _flatcar.kernel_version_from_node(node)
-            if fv and kv:
-                node_pairs.add((fv, kv))
+            if fv:
+                node_flatcars.add(fv)
+                flatcar_node_counts[fv] = flatcar_node_counts.get(fv, 0) + 1
 
-        # Build observedNodes (deduplicated by (flatcar, kernel), with nodeCount).
-        pair_counts: dict[tuple[str, str], int] = {}
-        for node in nodes:
-            fv = _flatcar.flatcar_version_from_node(node)
-            kv = _flatcar.kernel_version_from_node(node)
-            if fv and kv:
-                pair_counts[(fv, kv)] = pair_counts.get((fv, kv), 0) + 1
-        for (fv, kv), count in pair_counts.items():
-            observed_nodes.append(
-                {"flatcarVersion": fv, "kernelVersion": kv, "nodeCount": count}
-            )
+        for fv, count in flatcar_node_counts.items():
+            observed_nodes.append({"flatcarVersion": fv, "nodeCount": count})
     else:
         logger.debug("reconcile: discoverFromNodes=false, skipping node listing")
 
-    # --- 2. Tracked pairs from poller ---
+    # --- 2. Tracked Flatcar versions from poller ---
     tracked_entries: list[dict] = (status or {}).get("trackedChannelVersions") or []
-    tracked_pairs: set[tuple[str, str]] = {
-        (e["flatcarVersion"], e["kernelVersion"])
+    tracked_flatcars: set[str] = {
+        e["flatcarVersion"]
         for e in tracked_entries
-        if e.get("flatcarVersion") and e.get("kernelVersion")
+        if e.get("flatcarVersion")
     }
 
     # --- 3. Compute desired ---
     driver_versions: list[str] = spec.get("driverVersions") or []
     precompile: bool = bool(spec.get("precompile", False))
     explicit_versions: list[str] = flatcar_cfg.get("versions") or []
-    arch: str = flatcar_cfg.get("arch", "amd64")
 
-    # For explicit versions in precompile mode, we need the kernel version.
-    # Try to resolve it from the Flatcar release feed (stable first, then lts).
-    # Already-known versions (from tracked_pairs or node_pairs) are skipped.
-    if precompile and explicit_versions:
-        known_flatcars = {fc for fc, _ in (node_pairs | tracked_pairs)}
-        for ev in explicit_versions:
-            if ev in known_flatcars:
-                continue  # Already have kernel from tracked/node sources.
-            for channel in ("stable", "lts", "beta", "alpha"):
-                try:
-                    kv = _flatcar.kernel_for_release(channel, ev, arch)
-                    tracked_pairs.add((ev, kv))
-                    logger.info(
-                        "reconcile: resolved kernel for explicit version %s "
-                        "via %s channel: %s",
-                        ev, channel, kv,
-                    )
-                    break
-                except _flatcar.FlatcarFeedError:
-                    continue
-            else:
-                logger.warning(
-                    "reconcile: could not resolve kernel for explicit version %s "
-                    "from any channel; will build runtime-mode fallback",
-                    ev,
-                )
-
-    # Compute union of all flatcar version sources.
-    all_flatcar_versions = (
-        {fc for fc, _ in node_pairs}
-        | {fc for fc, _ in tracked_pairs}
-        | set(explicit_versions)
-    )
+    all_flatcar_versions = node_flatcars | tracked_flatcars | set(explicit_versions)
     if not all_flatcar_versions:
         logger.warning(
             "reconcile: no Flatcar versions found; set spec.flatcar.versions, "
@@ -387,7 +345,7 @@ def _do_reconcile(
         return
 
     desired = _reconciler.compute_desired(
-        driver_versions, node_pairs, tracked_pairs,
+        driver_versions, node_flatcars, tracked_flatcars,
         precompile=precompile,
         explicit_versions=explicit_versions,
     )
@@ -441,7 +399,6 @@ def _do_reconcile(
         if not (dv and fv):
             continue
 
-        # Determine phase from job status.
         active = int(jstatus.get("active", 0))
         succeeded = int(jstatus.get("succeeded", 0))
         failed = int(jstatus.get("failed", 0))
@@ -454,17 +411,7 @@ def _do_reconcile(
         else:
             phase = "Pending"
 
-        if precompile:
-            key = _reconciler.parse_precompile_tag(
-                jlabels.get("vgpu.flatcar.io/image-tag", "")
-            )
-        else:
-            key = _reconciler.parse_runtime_tag(
-                jlabels.get("vgpu.flatcar.io/image-tag", "")
-            )
-        # Fallback: build a key from labels (no kernel for runtime).
-        if key is None:
-            key = _reconciler.BuildKey(driver=dv, flatcar=fv, kernel=None)
+        key = _reconciler.BuildKey(driver=dv, flatcar=fv, precompile=precompile)
 
         if phase in ("Pending", "Building"):
             in_flight.add(key)
@@ -509,34 +456,34 @@ def _do_reconcile(
                 logger.warning("reconcile: failed to create Job %s: %s", jname, exc)
 
     # --- 8. Build status payload ---
-    tag_fn = _reconciler.precompile_tag if precompile else _reconciler.runtime_tag
-    parse_fn = _reconciler.parse_precompile_tag if precompile else _reconciler.parse_runtime_tag
-
-    # Map existing tags → BuildKey for phase derivation.
-    built_keys: set[_reconciler.BuildKey] = set()
-    for tag in existing_tags:
-        k = parse_fn(tag)
-        if k is not None:
-            built_keys.add(k)
+    # For precompile builds: find any existing tag matching the driver/flatcar pair
+    # to report back in status (kernel is embedded in the tag by the build job).
+    def _find_tag_for_key(key: _reconciler.BuildKey) -> str:
+        if key.precompile:
+            for tag in existing_tags:
+                if _reconciler.matches_precompile_tag(key, tag):
+                    return tag
+            return f"{key.driver}-<kernel>-flatcar{key.flatcar}"
+        return _reconciler.runtime_tag(key)
 
     builds: list[dict] = []
-    for key in sorted(desired, key=lambda k: (k.driver, k.flatcar, k.kernel or "")):
-        # For explicit versions without a known kernel, kernel=None even in
-        # precompile mode — fall back to runtime_tag so we don't raise.
-        effective_tag_fn = (
-            _reconciler.precompile_tag if (precompile and key.kernel is not None)
-            else _reconciler.runtime_tag
-        )
-        tag = effective_tag_fn(key)
+    for key in sorted(desired, key=lambda k: (k.driver, k.flatcar)):
+        tag = _find_tag_for_key(key)
         jname = job_key_map.get(key, "")
-        if key in built_keys:
+        if precompile:
+            # Check if any matching tag exists.
+            built = any(_reconciler.matches_precompile_tag(key, t) for t in existing_tags)
+        else:
+            built = _reconciler.parse_runtime_tag(tag) is not None and tag in existing_tags
+
+        if built:
             phase = "Ready"
         elif key in in_flight:
             phase = job_phase_map.get(jname, "Building")
         else:
             phase = "Pending"
 
-        mode = "precompiled" if (precompile and key.kernel is not None) else "compiled"
+        mode = "precompiled" if key.precompile else "compiled"
         entry: dict = {
             "driverVersion": key.driver,
             "flatcarVersion": key.flatcar,
@@ -545,8 +492,6 @@ def _do_reconcile(
             "phase": phase,
             "lastTransitionTime": now_str,
         }
-        if key.kernel:
-            entry["kernelVersion"] = key.kernel
         if jname:
             entry["jobName"] = jname
         builds.append(entry)
@@ -574,8 +519,6 @@ def _do_reconcile(
     # --- 9. GC (if enabled) ---
     retention: dict = spec.get("retention") or {}
     if retention.get("enabled") and reg_auth is not None:
-        # Merge observedNodes into status before passing to gc.run so it can
-        # use the freshly-computed set.
         merged_status = dict(status or {})
         merged_status["observedNodes"] = observed_nodes
 

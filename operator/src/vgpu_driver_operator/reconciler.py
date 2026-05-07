@@ -39,34 +39,27 @@ except ImportError:  # pragma: no cover
 
 @dataclass(frozen=True)
 class BuildKey:
-    """Identifies one (driver, flatcar, kernel?) build combination."""
+    """Identifies one (driver, flatcar, mode) build combination.
+
+    The operator no longer resolves or stores kernel version — the build job
+    auto-discovers it from the flatcar-sources base image at build time.
+    """
 
     driver: str
     flatcar: str
-    kernel: str | None = None  # None → runtime mode; set → precompile mode
+    precompile: bool = False
 
 
 # ---------------------------------------------------------------------------
 # Tag formatters / parsers
 # ---------------------------------------------------------------------------
 
-# Runtime tag:   "<driver>-flatcar<flatcar>"
-# Precompile tag: "<driver>-<kernel>-flatcar<flatcar>"
+# Runtime tag:    "<driver>-flatcar<flatcar>"
+# Precompile tag: "<driver>-<kernel>-flatcar<flatcar>"  (kernel discovered at build time)
 #
-# The separator between the driver version and the flatcar section is
-# "-flatcar", which is a literal string that does not appear in typical
-# version numbers.  Kernel is sandwiched between driver and "-flatcar".
-
-_RUNTIME_RE = re.compile(
-    r"^(?P<driver>[^-]+(?:-[^f][^-]*)*)-flatcar(?P<flatcar>.+)$"
-)
-
-# More precise patterns anchored on the literal "-flatcar" separator.
-# Runtime:    <driver>-flatcar<flatcar>
-# Precompile: <driver>-<kernel>-flatcar<flatcar>
-#
-# We need to handle driver versions like "550.54.15" and kernel versions like
-# "6.1.119".  Both are dot-separated numerics.  The safe anchor is "-flatcar".
+# The operator uses the runtime tag for exact-match idempotency checks.
+# For precompile mode, idempotency is checked via a prefix/pattern search
+# against the registry (any tag matching "<driver>-*-flatcar<flatcar>").
 
 
 def runtime_tag(key: BuildKey) -> str:
@@ -74,11 +67,29 @@ def runtime_tag(key: BuildKey) -> str:
     return f"{key.driver}-flatcar{key.flatcar}"
 
 
-def precompile_tag(key: BuildKey) -> str:
-    """Return the image tag for a precompiled build."""
-    if key.kernel is None:
-        raise ValueError("precompile_tag requires key.kernel to be set")
-    return f"{key.driver}-{key.kernel}-flatcar{key.flatcar}"
+def precompile_tag_prefix(key: BuildKey) -> str:
+    """Return the tag prefix used to detect existing precompile builds.
+
+    The actual tag is ``<driver>-<kernel>-flatcar<flatcar>`` where kernel is
+    discovered by the build job.  This prefix (``<driver>-``) combined with
+    the suffix (``-flatcar<flatcar>``) identifies matching tags.
+    """
+    return f"{key.driver}-"
+
+
+def precompile_tag_suffix(key: BuildKey) -> str:
+    """Return the tag suffix used to detect existing precompile builds."""
+    return f"-flatcar{key.flatcar}"
+
+
+def matches_precompile_tag(key: BuildKey, tag: str) -> bool:
+    """Return True if *tag* matches the expected precompile pattern for *key*.
+
+    Pattern: ``<driver>-<anything>-flatcar<flatcar>``
+    """
+    prefix = precompile_tag_prefix(key)
+    suffix = precompile_tag_suffix(key)
+    return tag.startswith(prefix) and tag.endswith(suffix) and len(tag) > len(prefix) + len(suffix)
 
 
 def parse_runtime_tag(tag: str) -> BuildKey | None:
@@ -86,7 +97,6 @@ def parse_runtime_tag(tag: str) -> BuildKey | None:
 
     Returns ``None`` if *tag* does not match the expected format.
     """
-    # Find the last occurrence of "-flatcar" as the separator.
     sep = "-flatcar"
     idx = tag.rfind(sep)
     if idx < 1:
@@ -95,13 +105,14 @@ def parse_runtime_tag(tag: str) -> BuildKey | None:
     flatcar = tag[idx + len(sep):]
     if not driver or not flatcar:
         return None
-    return BuildKey(driver=driver, flatcar=flatcar, kernel=None)
+    return BuildKey(driver=driver, flatcar=flatcar, precompile=False)
 
 
 def parse_precompile_tag(tag: str) -> BuildKey | None:
-    """Parse a precompile tag back to a ``BuildKey``.
+    """Parse a precompile tag back to a ``BuildKey`` (without kernel).
 
     Returns ``None`` if *tag* does not match the expected format.
+    Pattern: ``<driver>-<kernel>-flatcar<flatcar>``
     """
     sep = "-flatcar"
     idx = tag.rfind(sep)
@@ -109,20 +120,34 @@ def parse_precompile_tag(tag: str) -> BuildKey | None:
         return None
     flatcar = tag[idx + len(sep):]
     remainder = tag[:idx]  # "<driver>-<kernel>"
-    # Split remainder into driver and kernel: driver is everything up to the
-    # first "-" followed by a digit (version-like), then the rest is kernel.
-    # Because both driver and kernel are version strings (digits and dots with
-    # optional leading component), we split on the FIRST "-" that is preceded
-    # by a digit and followed by a digit.
+    # Split remainder into driver and kernel: split on the FIRST "-" that is
+    # preceded by a digit and followed by a digit (version boundary).
     m = re.search(r"(\d)-(\d)", remainder)
     if not m:
         return None
     split_pos = m.start() + 1  # position of the "-"
     driver = remainder[:split_pos]
-    kernel = remainder[split_pos + 1:]
-    if not driver or not kernel or not flatcar:
+    if not driver or not flatcar:
         return None
-    return BuildKey(driver=driver, flatcar=flatcar, kernel=kernel)
+    return BuildKey(driver=driver, flatcar=flatcar, precompile=True)
+
+
+def extract_kernel_from_precompile_tag(tag: str) -> str | None:
+    """Extract the kernel version embedded in a precompile tag.
+
+    Returns ``None`` if the tag does not match the precompile pattern.
+    """
+    sep = "-flatcar"
+    idx = tag.rfind(sep)
+    if idx < 1:
+        return None
+    remainder = tag[:idx]  # "<driver>-<kernel>"
+    m = re.search(r"(\d)-(\d)", remainder)
+    if not m:
+        return None
+    split_pos = m.start() + 1
+    kernel = remainder[split_pos + 1:]
+    return kernel or None
 
 
 # ---------------------------------------------------------------------------
@@ -132,8 +157,8 @@ def parse_precompile_tag(tag: str) -> BuildKey | None:
 
 def compute_desired(
     driver_versions: list[str],
-    node_pairs: set[tuple[str, str]],
-    tracked_pairs: set[tuple[str, str]],
+    node_flatcars: set[str],
+    tracked_flatcars: set[str],
     *,
     precompile: bool,
     explicit_versions: list[str] | None = None,
@@ -144,47 +169,22 @@ def compute_desired(
     ----------
     driver_versions:
         List of NVIDIA driver version strings from the CRD spec.
-    node_pairs:
-        Set of ``(flatcar_version, kernel_version)`` tuples observed on nodes.
+    node_flatcars:
+        Set of Flatcar version strings observed on nodes.
         Should be empty when ``discoverFromNodes`` is false.
-    tracked_pairs:
-        Set of ``(flatcar_version, kernel_version)`` tuples from channel
-        poller.
+    tracked_flatcars:
+        Set of Flatcar version strings from channel poller.
     precompile:
-        When ``True`` build precompiled images keyed by kernel; otherwise
-        runtime images (kernel is ignored).
+        When ``True`` build precompiled images; otherwise runtime images.
     explicit_versions:
         Optional list of Flatcar version strings from ``spec.flatcar.versions``.
-        These are treated as kernel=None pairs in runtime mode, and skipped
-        in precompile mode (kernel is required for precompile — those come
-        from node_pairs and tracked_pairs).
     """
-    all_pairs: set[tuple[str, str]] = node_pairs | tracked_pairs
-
-    # Add explicit versions as (flatcar, kernel=None) pairs — they contribute
-    # to runtime builds. For precompile mode, explicit versions without a
-    # known kernel cannot produce a precompile tag, so we skip them there.
-    explicit_flatcars: set[str] = set(explicit_versions or [])
+    all_flatcars: set[str] = node_flatcars | tracked_flatcars | set(explicit_versions or [])
 
     result: set[BuildKey] = set()
     for driver in driver_versions:
-        if precompile:
-            for flatcar, kernel in all_pairs:
-                result.add(BuildKey(driver=driver, flatcar=flatcar, kernel=kernel))
-            # Explicit versions in precompile mode: if the flatcar appears in
-            # all_pairs we already have it; otherwise emit a kernel=None key so
-            # that the reconciler can still surface a build status entry (the
-            # job_factory will need to handle kernel=None in precompile mode,
-            # which is a separate concern — for now we include them).
-            tracked_flatcars = {fc for fc, _ in all_pairs}
-            for flatcar in explicit_flatcars:
-                if flatcar not in tracked_flatcars:
-                    result.add(BuildKey(driver=driver, flatcar=flatcar, kernel=None))
-        else:
-            # Deduplicate by flatcar version — kernel is irrelevant for runtime.
-            seen_flatcar = {fc for fc, _ in all_pairs} | explicit_flatcars
-            for flatcar in seen_flatcar:
-                result.add(BuildKey(driver=driver, flatcar=flatcar, kernel=None))
+        for flatcar in all_flatcars:
+            result.add(BuildKey(driver=driver, flatcar=flatcar, precompile=precompile))
     return result
 
 
@@ -203,15 +203,18 @@ def compute_missing(
     """Return the subset of *desired* keys that have no existing tag and no
     in-flight job.
     """
-    parse = parse_precompile_tag if precompile else parse_runtime_tag
-    tag_fn = precompile_tag if precompile else runtime_tag
-
     # Build set of BuildKeys that already have an image.
     built: set[BuildKey] = set()
-    for tag in existing_tags:
-        key = parse(tag)
-        if key is not None:
-            built.add(key)
+    if precompile:
+        for tag in existing_tags:
+            key = parse_precompile_tag(tag)
+            if key is not None:
+                built.add(key)
+    else:
+        for tag in existing_tags:
+            key = parse_runtime_tag(tag)
+            if key is not None:
+                built.add(key)
 
     missing: set[BuildKey] = set()
     for key in desired:

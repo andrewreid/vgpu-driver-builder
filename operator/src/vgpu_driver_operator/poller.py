@@ -76,7 +76,6 @@ def run_once(
         for channel in channels:
             try:
                 version = _flatcar.latest_release(channel, arch, session=sess)
-                kernel = _flatcar.kernel_for_release(channel, version, arch, session=sess)
             except _flatcar.FlatcarFeedError as exc:
                 log.error(
                     "poller: %s channel=%s fetch failed: %s", name, channel, exc
@@ -85,14 +84,13 @@ def run_once(
                 continue
 
             log.info(
-                "poller: %s channel=%s flatcar=%s kernel=%s",
-                name, channel, version, kernel,
+                "poller: %s channel=%s flatcar=%s",
+                name, channel, version,
             )
             updated_entries.append(
                 {
                     "channel": channel,
                     "flatcarVersion": version,
-                    "kernelVersion": kernel,
                     "observedAt": datetime.now(tz=timezone.utc).isoformat(),
                 }
             )

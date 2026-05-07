@@ -19,7 +19,6 @@ _OS_IMAGE_RE = re.compile(
 )
 
 _NFD_OS_VERSION = "feature.node.kubernetes.io/system-os_release.VERSION_ID"
-_NFD_KERNEL_VERSION = "feature.node.kubernetes.io/kernel-version.full"
 
 # NFD sets VERSION_ID to e.g. "3815.2.0" on Flatcar — the ID label is set
 # only on Flatcar nodes; validate it looks like a Flatcar version triple.
@@ -69,26 +68,6 @@ def flatcar_version_from_node(node: dict) -> str | None:
     return parse_flatcar_version_from_os_image(os_image)
 
 
-def kernel_version_from_node(node: dict) -> str | None:
-    """Return the kernel version for a Kubernetes node dict.
-
-    Preference order:
-    1. NFD label ``feature.node.kubernetes.io/kernel-version.full``
-    2. ``node.status.nodeInfo.kernelVersion``
-
-    Returns ``None`` if neither source is present.
-    """
-    labels: dict = (node.get("metadata") or {}).get("labels") or {}
-    nfd_val = labels.get(_NFD_KERNEL_VERSION)
-    if nfd_val:
-        return nfd_val
-
-    kv: str = (
-        (node.get("status") or {}).get("nodeInfo") or {}
-    ).get("kernelVersion", "")
-    return kv or None
-
-
 def latest_release(
     channel: str,
     arch: str = "amd64",
@@ -118,30 +97,6 @@ def latest_release(
     """
     url = f"https://{channel}.release.flatcar-linux.net/{arch}-usr/current/version.txt"
     return _fetch_version_key(url, "FLATCAR_VERSION", session=session)
-
-
-def kernel_for_release(
-    channel: str,
-    version: str,
-    arch: str = "amd64",
-    *,
-    session=None,
-) -> str:
-    """Return the kernel version bundled with a specific Flatcar release.
-
-    Fetches ``https://{channel}.release.flatcar-linux.net/{arch}-usr/{version}/version.txt``
-    and parses the ``FLATCAR_KERNEL_VERSION=`` line.
-
-    Raises
-    ------
-    FlatcarFeedError
-        On HTTP error or if the expected line is not found in the response.
-    """
-    url = (
-        f"https://{channel}.release.flatcar-linux.net"
-        f"/{arch}-usr/{version}/version.txt"
-    )
-    return _fetch_version_key(url, "FLATCAR_KERNEL_VERSION", session=session)
 
 
 # ---------------------------------------------------------------------------

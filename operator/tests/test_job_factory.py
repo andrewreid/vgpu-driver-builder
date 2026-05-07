@@ -58,8 +58,8 @@ _SPEC = {
     },
 }
 
-_RUNTIME_KEY = BuildKey(driver="550.54.15", flatcar="4230.2.3", kernel=None)
-_PRECOMPILE_KEY = BuildKey(driver="550.54.15", flatcar="4230.2.3", kernel="6.1.119")
+_RUNTIME_KEY = BuildKey(driver="550.54.15", flatcar="4230.2.3", precompile=False)
+_PRECOMPILE_KEY = BuildKey(driver="550.54.15", flatcar="4230.2.3", precompile=True)
 
 _COMMON_KWARGS = dict(
     crd_namespace="vgpu-system",
@@ -105,50 +105,46 @@ class TestSnapshots:
 class TestBuildJobName:
     def test_name_fits_63_chars_runtime(self):
         name = build_job_name(
-            BuildKey("550.54.15", "4230.2.3"),
+            BuildKey("550.54.15", "4230.2.3", False),
             "abc123def456",
-            precompile=False,
         )
         assert len(name) <= 63
 
     def test_name_fits_63_chars_precompile(self):
         name = build_job_name(
-            BuildKey("550.54.15", "4230.2.3", "6.1.119"),
+            BuildKey("550.54.15", "4230.2.3", True),
             "abc123def456",
-            precompile=True,
         )
         assert len(name) <= 63
 
     def test_long_driver_version_truncated(self):
         long_driver = "550.54.15.very.long.version.string.that.should.be.truncated"
         name = build_job_name(
-            BuildKey(long_driver, "4230.2.3"),
+            BuildKey(long_driver, "4230.2.3", False),
             "abc123def456",
-            precompile=False,
         )
         assert len(name) <= 63
 
     def test_hash_always_present_at_end(self):
         name = build_job_name(
-            BuildKey("550.54.15", "4230.2.3"),
+            BuildKey("550.54.15", "4230.2.3", False),
             "deadbeef1234",
-            precompile=False,
         )
         assert name.endswith("deadbe")
 
     @pytest.mark.parametrize(
-        "driver,flatcar,kernel,precompile",
+        "driver,flatcar,precompile",
         [
-            ("550.54.15", "4230.2.3", None, False),
-            ("535.183.01", "3815.2.0", None, False),
-            ("520.0.0", "4081.2.0", None, False),
-            ("550.54.15", "4230.2.3", "6.1.119", True),
-            ("535.183.01", "3815.2.0", "5.15.126", True),
+            ("550.54.15", "4230.2.3", False),
+            ("535.183.01", "3815.2.0", False),
+            ("520.0.0", "4081.2.0", False),
+            ("550.54.15", "4230.2.3", True),
+            ("535.183.01", "3815.2.0", True),
         ],
     )
-    def test_reasonable_inputs(self, driver, flatcar, kernel, precompile):
-        key = BuildKey(driver=driver, flatcar=flatcar, kernel=kernel)
-        name = build_job_name(key, "abc123def456", precompile=precompile)
+    def test_reasonable_inputs(self, driver, flatcar, precompile):
+        key = BuildKey(driver=driver, flatcar=flatcar, precompile=precompile)
+        name = build_job_name(key, "abc123def456")
         assert len(name) <= 63, f"Name too long: {name!r}"
         assert name == name.lower()
 
@@ -203,14 +199,40 @@ class TestBuildArgs:
         cmd = _get_main_command(manifest)
         assert "KERNEL_VERSION_OVERRIDE" not in cmd
 
-    def test_precompile_has_kernel_version_override(self):
+    def test_precompile_no_kernel_version_override(self):
+        """Precompile job must NOT pass KERNEL_VERSION_OVERRIDE — kernel is
+        discovered from the base image at build time."""
         manifest = build_job_manifest(
             spec=_SPEC,
             key=_PRECOMPILE_KEY,
             **_COMMON_KWARGS,
         )
         cmd = _get_main_command(manifest)
-        assert "KERNEL_VERSION_OVERRIDE=6.1.119" in cmd
+        assert "KERNEL_VERSION_OVERRIDE" not in cmd
+
+    def test_precompile_has_kernel_discover_phase(self):
+        """Precompile job command must include kernel discovery logic."""
+        manifest = build_job_manifest(
+            spec=_SPEC,
+            key=_PRECOMPILE_KEY,
+            **_COMMON_KWARGS,
+        )
+        cmd = _get_main_command(manifest)
+        assert "kernel-discover" in cmd
+        assert "KERNEL_VERSION" in cmd
+        assert "/tmp/kinfo" in cmd
+
+    def test_precompile_output_tag_uses_discovered_kernel(self):
+        """Precompile output tag must use the shell variable $KERNEL_VERSION."""
+        manifest = build_job_manifest(
+            spec=_SPEC,
+            key=_PRECOMPILE_KEY,
+            **_COMMON_KWARGS,
+        )
+        cmd = _get_main_command(manifest)
+        assert "${KERNEL_VERSION}" in cmd
+        assert "flatcar4230.2.3" in cmd
+        assert "550.54.15" in cmd
 
     def test_flatcar_image_ref_when_digest_provided(self):
         manifest = build_job_manifest(
@@ -342,7 +364,6 @@ class TestManifestStructure:
         assert labels["vgpu.flatcar.io/driver-version"] == "550.54.15"
         assert labels["vgpu.flatcar.io/flatcar-version"] == "4230.2.3"
         assert labels["vgpu.flatcar.io/mode"] == "runtime"
-        # Labels must be identical on pod template
         pod_labels = manifest["spec"]["template"]["metadata"]["labels"]
         assert pod_labels["app.kubernetes.io/component"] == "builder"
 
@@ -373,18 +394,6 @@ class TestManifestStructure:
         )
         cmd = _get_main_command(manifest)
         assert "registry.example.com/vgpu-driver:550.54.15-flatcar4230.2.3" in cmd
-
-    def test_precompile_output_tag(self):
-        manifest = build_job_manifest(
-            spec=_SPEC,
-            key=_PRECOMPILE_KEY,
-            **_COMMON_KWARGS,
-        )
-        cmd = _get_main_command(manifest)
-        assert (
-            "registry.example.com/vgpu-driver-prebuilt:550.54.15-6.1.119-flatcar4230.2.3"
-            in cmd
-        )
 
     def test_s3_secret_env_vars_in_init_container(self):
         manifest = build_job_manifest(

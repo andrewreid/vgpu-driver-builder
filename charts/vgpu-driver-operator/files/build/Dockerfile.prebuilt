@@ -18,6 +18,38 @@ ARG FLATCAR_IMAGE_SUFFIX=-sources
 ARG FLATCAR_VERSION
 ARG FLATCAR_IMAGE_REF=${FLATCAR_IMAGE_REPO}:${FLATCAR_VERSION}${FLATCAR_IMAGE_SUFFIX}
 
+# -----------------------------------------------------------------------------
+# kernel-discover: export the kernel version string present in the base image.
+# The operator does not know the kernel version ahead of time; the build job
+# runs this stage first, reads /tmp/kinfo/kernel_version, then uses the result
+# in the final output tag (<driver>-<kernel>-flatcar<flatcar>).
+# -----------------------------------------------------------------------------
+
+FROM ${FLATCAR_IMAGE_REF} AS kernel-discover
+
+RUN set -eu \
+    && set -- /lib/modules/* \
+    && if [ "$#" -eq 0 ] || [ ! -d "$1" ]; then \
+         echo "ERROR: no kernel found under /lib/modules in base image" >&2; \
+         exit 1; \
+       fi \
+    && if [ "$#" -gt 1 ]; then \
+         echo "ERROR: multiple kernels under /lib/modules — expected exactly one:" >&2; \
+         ls /lib/modules >&2; \
+         exit 1; \
+       fi \
+    && printf '%s\n' "${1##*/}" > /kernel_version
+
+# Export the kernel_version file to the build host via --output type=local.
+FROM scratch AS kernel-discover-export
+COPY --from=kernel-discover /kernel_version /kernel_version
+
+# -----------------------------------------------------------------------------
+# builder: compile precompiled NVIDIA kernel modules.
+# KERNEL_VERSION is passed as a build-arg (discovered by the build job via the
+# kernel-discover stage above).
+# -----------------------------------------------------------------------------
+
 FROM ${FLATCAR_IMAGE_REF} AS builder
 
 SHELL ["/bin/bash", "-c"]
@@ -25,16 +57,15 @@ SHELL ["/bin/bash", "-c"]
 ARG DRIVER_VERSION
 ARG DRIVER_TYPE=vgpu
 ARG VGPU_LICENSE_SERVER_TYPE=NLS
-# KERNEL_VERSION_OVERRIDE is required: the builder must know which kernel to
-# target so it does not have to infer it at image-build time from /usr/lib64/modules.
-ARG KERNEL_VERSION_OVERRIDE
+ARG KERNEL_VERSION
 
 ENV DRIVER_VERSION=${DRIVER_VERSION} \
     NVIDIA_VISIBLE_DEVICES=void \
     DRIVER_TYPE=${DRIVER_TYPE} \
-    VGPU_LICENSE_SERVER_TYPE=${VGPU_LICENSE_SERVER_TYPE}
+    VGPU_LICENSE_SERVER_TYPE=${VGPU_LICENSE_SERVER_TYPE} \
+    KERNEL_VERSION=${KERNEL_VERSION}
 
-RUN test -n "${KERNEL_VERSION_OVERRIDE:?KERNEL_VERSION_OVERRIDE build-arg required}"
+RUN test -n "${KERNEL_VERSION:?KERNEL_VERSION build-arg required}"
 
 RUN mkdir -p /drivers
 
@@ -67,7 +98,6 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
          --x-library-path=/tmp/null \
          --x-sysconfig-path=/tmp/null \
     && cd / \
-    && export KERNEL_VERSION_OVERRIDE="${KERNEL_VERSION_OVERRIDE}" \
     && nvidia-driver build-precompiled \
     && rm -rf /drivers/NVIDIA-Linux-${DRIVER_ARCH}-${DRIVER_VERSION}.run
 
@@ -83,6 +113,7 @@ SHELL ["/bin/bash", "-c"]
 
 ARG DRIVER_VERSION
 ARG FLATCAR_VERSION
+ARG KERNEL_VERSION
 ARG DRIVER_TYPE=vgpu
 ARG VGPU_LICENSE_SERVER_TYPE=NLS
 ARG GIT_REVISION=""
@@ -142,6 +173,7 @@ LABEL org.opencontainers.image.title="NVIDIA vGPU driver (Flatcar precompiled)" 
       org.opencontainers.image.vendor="andrewreid" \
       org.opencontainers.image.licenses="Apache-2.0" \
       org.opencontainers.image.description="Precompiled NVIDIA vGPU driver modules for Flatcar ${FLATCAR_VERSION}" \
-      flatcar.version="${FLATCAR_VERSION}"
+      flatcar.version="${FLATCAR_VERSION}" \
+      flatcar.kernel.version="${KERNEL_VERSION}"
 
 ENTRYPOINT ["nvidia-driver"]

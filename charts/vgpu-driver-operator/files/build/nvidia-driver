@@ -415,7 +415,7 @@ _link_and_install_modules() {
 }
 
 build_precompiled() {
-    : "${KERNEL_VERSION_OVERRIDE:?KERNEL_VERSION_OVERRIDE required for build-precompiled}"
+    : "${KERNEL_VERSION:?KERNEL_VERSION env var required for build-precompiled}"
     _log INFO "Building precompiled NVIDIA driver image artifacts for ${KERNEL_VERSION}"
 
     rm -rf "/drivers/NVIDIA-Linux-${DRIVER_ARCH}-${DRIVER_VERSION}" \
@@ -486,9 +486,10 @@ if [ $# -eq 0 ]; then
     set -- init
 fi
 
-if [ -n "${KERNEL_VERSION_OVERRIDE:-}" ]; then
-    KERNEL_VERSION=${KERNEL_VERSION_OVERRIDE}
-else
+# For build-precompiled mode, KERNEL_VERSION is set via the KERNEL_VERSION
+# build-arg in Dockerfile.prebuilt (discovered from /lib/modules at build time).
+# For init mode on a running node, fall back to uname -r.
+if [ -z "${KERNEL_VERSION:-}" ]; then
     KERNEL_VERSION=$(uname -r)
 fi
 PACKAGE_TAG=""

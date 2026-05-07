@@ -6,7 +6,7 @@ import hashlib
 import re
 from typing import Any
 
-from vgpu_driver_operator.reconciler import BuildKey, precompile_tag, runtime_tag
+from vgpu_driver_operator.reconciler import BuildKey, runtime_tag
 
 _DEFAULT_BUILDKIT_IMAGE = "moby/buildkit:rootless"
 _FETCH_DRIVER_IMAGE = "amazon/aws-cli:2.13.0"
@@ -21,31 +21,24 @@ _K8S_LABEL_MAX = 63
 # ---------------------------------------------------------------------------
 
 
-def build_job_name(key: BuildKey, inputs_hash: str, *, precompile: bool) -> str:
+def build_job_name(key: BuildKey, inputs_hash: str) -> str:
     """Generate a Job name that fits within 63 characters.
 
     Format (before truncation):
-        ``vgpu-build-{mode}-{driver_s}-fc-{flatcar_s}[-k{kernel6}]-{hash6}``
+        ``vgpu-build-{mode}-{driver_s}-fc-{flatcar_s}-{hash6}``
 
     where ``mode`` is ``runtime`` or ``prec``, sanitised versions replace
-    ``[._]`` with ``-`` and are lowercased, and ``kernel6`` is the first 6
-    chars of ``sha256(kernel)``.  ``hash6`` is the first 6 chars of
-    *inputs_hash*.
+    ``[._]`` with ``-`` and are lowercased, and ``hash6`` is the first 6
+    chars of *inputs_hash*.
     """
-    mode = "prec" if precompile else "runtime"
+    mode = "prec" if key.precompile else "runtime"
     driver_s = _sanitize(key.driver)
     flatcar_s = _sanitize(key.flatcar)
     hash6 = inputs_hash[:6]
 
-    parts = ["vgpu-build", mode, driver_s, "fc", flatcar_s]
-    if precompile and key.kernel:
-        kernel6 = hashlib.sha256(key.kernel.encode()).hexdigest()[:6]
-        parts.append(f"k{kernel6}")
-    parts.append(hash6)
-
+    parts = ["vgpu-build", mode, driver_s, "fc", flatcar_s, hash6]
     name = "-".join(parts)
     if len(name) > _K8S_NAME_MAX:
-        # Truncate the middle, keeping the trailing hash6 intact.
         suffix = f"-{hash6}"
         max_prefix = _K8S_NAME_MAX - len(suffix)
         name = name[:max_prefix] + suffix
@@ -107,31 +100,21 @@ def build_job_manifest(
 
     # Compute inputs hash for the job name.
     spec_hash = hashlib.sha256(str(sorted(spec.items())).encode()).hexdigest()[:8]
-    inputs_str = (
-        key.driver
-        + key.flatcar
-        + (key.kernel or "")
-        + str(precompile := key.kernel is not None)
-        + spec_hash
-    )
+    inputs_str = key.driver + key.flatcar + str(key.precompile) + spec_hash
     inputs_hash = hashlib.sha256(inputs_str.encode()).hexdigest()
-    job_name = build_job_name(key, inputs_hash, precompile=precompile)
+    job_name = build_job_name(key, inputs_hash)
 
-    # Choose output tag and dockerfile mount path based on mode.
-    if precompile:
-        out_tag = precompile_tag(key)
+    # Choose repository and dockerfile based on mode.
+    if key.precompile:
         repo = registry.get("repositoryPrecompiled") or registry.get("repository", "")
         dockerfile_key = "Dockerfile.prebuilt"
         dockerfile_mount_path = "/workspace/prebuild/Dockerfile"
         mode_label = "precompiled"
     else:
-        out_tag = runtime_tag(key)
         repo = registry.get("repository", "")
         dockerfile_key = "Dockerfile"
         dockerfile_mount_path = "/workspace/Dockerfile"
         mode_label = "runtime"
-
-    full_output_ref = f"{repo}:{out_tag}" if repo else out_tag
 
     # Cache flags.
     cache_repo = registry.get("cacheRepository", "")
@@ -141,23 +124,6 @@ def build_job_manifest(
             f"--import-cache type=registry,ref={cache_repo}:shared",
             f"--export-cache type=registry,ref={cache_repo}:shared,mode=max",
         ]
-
-    # Build-args.
-    build_args: list[str] = [
-        f"--opt build-arg:FLATCAR_VERSION={key.flatcar}",
-        f"--opt build-arg:DRIVER_VERSION={key.driver}",
-        f"--opt build-arg:GIT_REVISION={git_revision}",
-        f"--opt build-arg:BUILD_CREATED={build_created}",
-    ]
-    if flatcar_image_digest:
-        base_repo = repo.split(":")[0] if ":" in repo else repo
-        build_args.append(
-            f"--opt build-arg:FLATCAR_IMAGE_REF={base_repo}@{flatcar_image_digest}"
-        )
-    if precompile and key.kernel:
-        build_args.append(
-            f"--opt build-arg:KERNEL_VERSION_OVERRIDE={key.kernel}"
-        )
 
     # S3 URI from template.
     uri_template: str = source.get("uriTemplate", "")
@@ -170,38 +136,24 @@ def build_job_manifest(
     )
 
     # Build the main container command.
-    cache_str = " \\\n              ".join(cache_flags)
-    build_args_str = " \\\n              ".join(build_args)
-    buildctl_cmd = (
-        "buildctl-daemonless.sh build \\\n"
-        "              --progress=plain \\\n"
-        "              --frontend=dockerfile.v0 \\\n"
-        "              --local context=/workspace \\\n"
-        f"              --local dockerfile=/workspace{'/' if precompile else ''}"
-        + ("prebuild" if precompile else "")
-        + (" \\\n              " if cache_flags else "")
-        + (" \\\n              ".join(cache_flags) if cache_flags else "")
-        + (
-            " \\\n              " + " \\\n              ".join(build_args)
-            if build_args
-            else ""
+    if key.precompile:
+        main_command = _build_precompile_command(
+            key=key,
+            repo=repo,
+            cache_flags=cache_flags,
+            flatcar_image_digest=flatcar_image_digest,
+            git_revision=git_revision,
+            build_created=build_created,
         )
-        + f" \\\n              --output type=image,name={full_output_ref},push=true"
-    )
-
-    main_cmd_lines = [
-        "if [ -f /kaniko/.docker/config.json ]; then",
-        "  export DOCKER_CONFIG=/kaniko/.docker",
-        "fi",
-        'export BUILDKITD_FLAGS="--oci-worker-no-process-sandbox"',
-        _build_buildctl_command(
-            precompile=precompile,
+    else:
+        out_tag = runtime_tag(key)
+        full_output_ref = f"{repo}:{out_tag}" if repo else out_tag
+        build_args = _base_build_args(key, flatcar_image_digest, git_revision, build_created, repo)
+        main_command = _build_runtime_command(
             cache_flags=cache_flags,
             build_args=build_args,
             full_output_ref=full_output_ref,
-        ),
-    ]
-    main_command = "\n".join(main_cmd_lines)
+        )
 
     # Labels.
     labels: dict[str, str] = {
@@ -386,29 +338,114 @@ def _truncate_label(s: str) -> str:
     return s[:_K8S_LABEL_MAX]
 
 
-def _build_buildctl_command(
+def _base_build_args(
+    key: BuildKey,
+    flatcar_image_digest: str | None,
+    git_revision: str,
+    build_created: str,
+    repo: str,
+) -> list[str]:
+    """Return the common build-args list (no kernel-related args)."""
+    args = [
+        f"--opt build-arg:FLATCAR_VERSION={key.flatcar}",
+        f"--opt build-arg:DRIVER_VERSION={key.driver}",
+        f"--opt build-arg:GIT_REVISION={git_revision}",
+        f"--opt build-arg:BUILD_CREATED={build_created}",
+    ]
+    if flatcar_image_digest:
+        base_repo = repo.split(":")[0] if ":" in repo else repo
+        args.append(
+            f"--opt build-arg:FLATCAR_IMAGE_REF={base_repo}@{flatcar_image_digest}"
+        )
+    return args
+
+
+def _build_runtime_command(
     *,
-    precompile: bool,
     cache_flags: list[str],
     build_args: list[str],
     full_output_ref: str,
 ) -> str:
-    """Assemble the ``buildctl-daemonless.sh`` command string."""
-    dockerfile_local = (
-        "--local dockerfile=/workspace/prebuild"
-        if precompile
-        else "--local dockerfile=/workspace"
-    )
-    parts = [
+    """Assemble the shell command for a runtime build job."""
+    lines = [
+        "if [ -f /kaniko/.docker/config.json ]; then",
+        "  export DOCKER_CONFIG=/kaniko/.docker",
+        "fi",
+        'export BUILDKITD_FLAGS="--oci-worker-no-process-sandbox"',
         "buildctl-daemonless.sh build \\",
         "  --progress=plain \\",
         "  --frontend=dockerfile.v0 \\",
         "  --local context=/workspace \\",
-        f"  {dockerfile_local} \\",
+        "  --local dockerfile=/workspace \\",
     ]
     for flag in cache_flags:
-        parts.append(f"  {flag} \\")
+        lines.append(f"  {flag} \\")
     for arg in build_args:
-        parts.append(f"  {arg} \\")
-    parts.append(f"  --output type=image,name={full_output_ref},push=true")
-    return "\n".join(parts)
+        lines.append(f"  {arg} \\")
+    lines.append(f"  --output type=image,name={full_output_ref},push=true")
+    return "\n".join(lines)
+
+
+def _build_precompile_command(
+    *,
+    key: BuildKey,
+    repo: str,
+    cache_flags: list[str],
+    flatcar_image_digest: str | None,
+    git_revision: str,
+    build_created: str,
+) -> str:
+    """Assemble the shell command for a precompile build job.
+
+    The command uses a two-phase approach:
+    1. A quick build targeting the ``kernel-discover`` stage to export the
+       kernel version string discovered from /lib/modules inside the base image.
+    2. A full build using that kernel version in the output image tag.
+
+    This avoids passing KERNEL_VERSION_OVERRIDE from the operator — the build
+    job discovers the kernel that is actually present in the base image.
+    """
+    base_args = _base_build_args(key, flatcar_image_digest, git_revision, build_created, repo)
+
+    # Output tag: <driver>-<kernel>-flatcar<flatcar>, shell expands KERNEL_VERSION.
+    full_output_ref = f"{repo}:{key.driver}-${{KERNEL_VERSION}}-flatcar{key.flatcar}" if repo else f"{key.driver}-${{KERNEL_VERSION}}-flatcar{key.flatcar}"
+
+    lines = [
+        "if [ -f /kaniko/.docker/config.json ]; then",
+        "  export DOCKER_CONFIG=/kaniko/.docker",
+        "fi",
+        'export BUILDKITD_FLAGS="--oci-worker-no-process-sandbox"',
+        "",
+        "# Phase 1: discover kernel version from the flatcar-sources base image.",
+        "buildctl-daemonless.sh build \\",
+        "  --progress=plain \\",
+        "  --frontend=dockerfile.v0 \\",
+        "  --local context=/workspace \\",
+        "  --local dockerfile=/workspace/prebuild \\",
+        "  --opt target=kernel-discover-export \\",
+        "  " + " \\\n  ".join(base_args) + " \\",
+        "  --output type=local,dest=/tmp/kinfo",
+        "",
+        "KERNEL_VERSION=$(cat /tmp/kinfo/kernel_version)",
+        'if [ -z "${KERNEL_VERSION}" ]; then',
+        '  echo "ERROR: kernel version discovery returned empty string" >&2',
+        "  exit 1",
+        "fi",
+        'echo "Discovered kernel version: ${KERNEL_VERSION}"',
+        "",
+        "# Phase 2: full precompile build with the discovered kernel in the output tag.",
+        "buildctl-daemonless.sh build \\",
+        "  --progress=plain \\",
+        "  --frontend=dockerfile.v0 \\",
+        "  --local context=/workspace \\",
+        "  --local dockerfile=/workspace/prebuild \\",
+    ]
+    if cache_flags:
+        for flag in cache_flags:
+            lines.append(f"  {flag} \\")
+    for arg in base_args:
+        lines.append(f"  {arg} \\")
+    lines.append(f"  --opt build-arg:KERNEL_VERSION=${{KERNEL_VERSION}} \\")
+    lines.append(f"  --output type=image,name={full_output_ref},push=true")
+
+    return "\n".join(lines)

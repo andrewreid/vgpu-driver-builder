@@ -10,7 +10,7 @@
       "vgpu.flatcar.io/mode": "precompiled",
       "vgpu.flatcar.io/owner-uid": "abc-123-uid"
     },
-    "name": "vgpu-build-prec-550-54-15-fc-4230-2-3-k9aa140-9a4630",
+    "name": "vgpu-build-prec-550-54-15-fc-4230-2-3-6d6fbd",
     "namespace": "vgpu-system",
     "ownerReferences": [
       {
@@ -42,7 +42,7 @@
             "command": [
               "/bin/sh",
               "-c",
-              "if [ -f /kaniko/.docker/config.json ]; then\n  export DOCKER_CONFIG=/kaniko/.docker\nfi\nexport BUILDKITD_FLAGS=\"--oci-worker-no-process-sandbox\"\nbuildctl-daemonless.sh build \\\n  --progress=plain \\\n  --frontend=dockerfile.v0 \\\n  --local context=/workspace \\\n  --local dockerfile=/workspace/prebuild \\\n  --import-cache type=registry,ref=registry.example.com/cache/vgpu-driver:shared \\\n  --export-cache type=registry,ref=registry.example.com/cache/vgpu-driver:shared,mode=max \\\n  --opt build-arg:FLATCAR_VERSION=4230.2.3 \\\n  --opt build-arg:DRIVER_VERSION=550.54.15 \\\n  --opt build-arg:GIT_REVISION=deadbeef \\\n  --opt build-arg:BUILD_CREATED=2025-01-10T12:00:00Z \\\n  --opt build-arg:KERNEL_VERSION_OVERRIDE=6.1.119 \\\n  --output type=image,name=registry.example.com/vgpu-driver-prebuilt:550.54.15-6.1.119-flatcar4230.2.3,push=true"
+              "if [ -f /kaniko/.docker/config.json ]; then\n  export DOCKER_CONFIG=/kaniko/.docker\nfi\nexport BUILDKITD_FLAGS=\"--oci-worker-no-process-sandbox\"\n\n# Phase 1: discover kernel version from the flatcar-sources base image.\nbuildctl-daemonless.sh build \\\n  --progress=plain \\\n  --frontend=dockerfile.v0 \\\n  --local context=/workspace \\\n  --local dockerfile=/workspace/prebuild \\\n  --opt target=kernel-discover-export \\\n  --opt build-arg:FLATCAR_VERSION=4230.2.3 \\\n  --opt build-arg:DRIVER_VERSION=550.54.15 \\\n  --opt build-arg:GIT_REVISION=deadbeef \\\n  --opt build-arg:BUILD_CREATED=2025-01-10T12:00:00Z \\\n  --output type=local,dest=/tmp/kinfo\n\nKERNEL_VERSION=$(cat /tmp/kinfo/kernel_version)\nif [ -z \"${KERNEL_VERSION}\" ]; then\n  echo \"ERROR: kernel version discovery returned empty string\" >&2\n  exit 1\nfi\necho \"Discovered kernel version: ${KERNEL_VERSION}\"\n\n# Phase 2: full precompile build with the discovered kernel in the output tag.\nbuildctl-daemonless.sh build \\\n  --progress=plain \\\n  --frontend=dockerfile.v0 \\\n  --local context=/workspace \\\n  --local dockerfile=/workspace/prebuild \\\n  --import-cache type=registry,ref=registry.example.com/cache/vgpu-driver:shared \\\n  --export-cache type=registry,ref=registry.example.com/cache/vgpu-driver:shared,mode=max \\\n  --opt build-arg:FLATCAR_VERSION=4230.2.3 \\\n  --opt build-arg:DRIVER_VERSION=550.54.15 \\\n  --opt build-arg:GIT_REVISION=deadbeef \\\n  --opt build-arg:BUILD_CREATED=2025-01-10T12:00:00Z \\\n  --opt build-arg:KERNEL_VERSION=${KERNEL_VERSION} \\\n  --output type=image,name=registry.example.com/vgpu-driver-prebuilt:550.54.15-${KERNEL_VERSION}-flatcar4230.2.3,push=true"
             ],
             "image": "moby/buildkit:rootless",
             "name": "buildkit",

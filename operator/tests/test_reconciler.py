@@ -10,9 +10,10 @@ from vgpu_driver_operator.reconciler import (
     compute_missing,
     compute_prunable,
     compute_retained_flatcar_set,
+    extract_kernel_from_precompile_tag,
+    matches_precompile_tag,
     parse_precompile_tag,
     parse_runtime_tag,
-    precompile_tag,
     runtime_tag,
 )
 
@@ -27,20 +28,20 @@ class TestComputeDesiredExplicitVersions:
         drivers = ["550.54.15"]
         result = compute_desired(
             drivers,
-            node_pairs=set(),
-            tracked_pairs=set(),
+            node_flatcars=set(),
+            tracked_flatcars=set(),
             precompile=False,
             explicit_versions=["4593.2.0"],
         )
-        assert result == {BuildKey(driver="550.54.15", flatcar="4593.2.0", kernel=None)}
+        assert result == {BuildKey(driver="550.54.15", flatcar="4593.2.0", precompile=False)}
 
     def test_explicit_versions_dedup_with_tracked(self):
         """Same flatcar from explicit + tracked → one key per driver in runtime."""
         drivers = ["550.54.15"]
         result = compute_desired(
             drivers,
-            node_pairs=set(),
-            tracked_pairs={("4593.2.0", "6.1.100")},
+            node_flatcars=set(),
+            tracked_flatcars={"4593.2.0"},
             precompile=False,
             explicit_versions=["4593.2.0"],
         )
@@ -51,8 +52,8 @@ class TestComputeDesiredExplicitVersions:
         drivers = ["550.54.15"]
         result = compute_desired(
             drivers,
-            node_pairs=set(),
-            tracked_pairs={("4230.2.3", "6.1.119")},
+            node_flatcars=set(),
+            tracked_flatcars={"4230.2.3"},
             precompile=False,
             explicit_versions=["4593.2.0"],
         )
@@ -60,112 +61,103 @@ class TestComputeDesiredExplicitVersions:
         assert "4230.2.3" in flatcars
         assert "4593.2.0" in flatcars
 
-    def test_explicit_versions_precompile_no_kernel(self):
-        """Explicit version with no matching tracked pair → kernel=None key."""
+    def test_explicit_versions_precompile(self):
+        """Explicit version in precompile mode → precompile=True key."""
         drivers = ["550.54.15"]
         result = compute_desired(
             drivers,
-            node_pairs=set(),
-            tracked_pairs=set(),
+            node_flatcars=set(),
+            tracked_flatcars=set(),
             precompile=True,
             explicit_versions=["4593.2.0"],
         )
-        assert BuildKey(driver="550.54.15", flatcar="4593.2.0", kernel=None) in result
+        assert BuildKey(driver="550.54.15", flatcar="4593.2.0", precompile=True) in result
 
     def test_empty_explicit_versions_no_effect(self):
         """empty explicit_versions → same as not passing it."""
         drivers = ["550.54.15"]
         result = compute_desired(
             drivers,
-            node_pairs={("4230.2.3", "6.1.119")},
-            tracked_pairs=set(),
+            node_flatcars={"4230.2.3"},
+            tracked_flatcars=set(),
             precompile=False,
             explicit_versions=[],
         )
-        assert result == {BuildKey(driver="550.54.15", flatcar="4230.2.3", kernel=None)}
+        assert result == {BuildKey(driver="550.54.15", flatcar="4230.2.3", precompile=False)}
 
     def test_none_explicit_versions_no_effect(self):
         """explicit_versions=None is equivalent to empty list."""
         drivers = ["550.54.15"]
         result = compute_desired(
             drivers,
-            node_pairs={("4230.2.3", "6.1.119")},
-            tracked_pairs=set(),
+            node_flatcars={"4230.2.3"},
+            tracked_flatcars=set(),
             precompile=False,
             explicit_versions=None,
         )
-        assert result == {BuildKey(driver="550.54.15", flatcar="4230.2.3", kernel=None)}
+        assert result == {BuildKey(driver="550.54.15", flatcar="4230.2.3", precompile=False)}
+
+    def test_precompile_explicit_produces_build_job(self):
+        """Bug 13 regression: explicit flatcar.versions with precompile=True must
+        produce a build key — never silently fall back to runtime mode."""
+        drivers = ["535.261.03"]
+        result = compute_desired(
+            drivers,
+            node_flatcars=set(),
+            tracked_flatcars=set(),
+            precompile=True,
+            explicit_versions=["4593.2.0"],
+        )
+        assert len(result) == 1
+        key = next(iter(result))
+        assert key.driver == "535.261.03"
+        assert key.flatcar == "4593.2.0"
+        assert key.precompile is True
 
 
 class TestComputeDesiredRuntime:
     def test_two_drivers_three_flatcars(self):
         drivers = ["550.54.15", "535.183.01"]
-        node_pairs = {
-            ("4230.2.3", "6.1.119"),
-            ("4081.2.0", "6.1.84"),
-            ("3815.2.0", "5.15.126"),
-        }
-        tracked_pairs: set[tuple[str, str]] = set()
+        node_flatcars = {"4230.2.3", "4081.2.0", "3815.2.0"}
         result = compute_desired(
-            drivers, node_pairs, tracked_pairs, precompile=False
+            drivers, node_flatcars, set(), precompile=False
         )
         assert len(result) == 6
-        # All kernel fields should be None in runtime mode.
-        assert all(k.kernel is None for k in result)
-        # Each driver × each flatcar should be present.
+        assert all(k.precompile is False for k in result)
         driver_flatcars = {(k.driver, k.flatcar) for k in result}
         assert ("550.54.15", "4230.2.3") in driver_flatcars
         assert ("535.183.01", "3815.2.0") in driver_flatcars
 
     def test_node_and_tracked_merged(self):
         drivers = ["550.54.15"]
-        node_pairs = {("4230.2.3", "6.1.119")}
-        tracked_pairs = {("4230.2.4", "6.1.120")}  # newer from poller
         result = compute_desired(
-            drivers, node_pairs, tracked_pairs, precompile=False
+            drivers, {"4230.2.3"}, {"4230.2.4"}, precompile=False
         )
         flatcars = {k.flatcar for k in result}
         assert "4230.2.3" in flatcars
         assert "4230.2.4" in flatcars
 
     def test_duplicate_flatcar_deduped(self):
-        """Same flatcar version from both node and tracked → 1 key per driver."""
+        """Same flatcar from both node and tracked → 1 key per driver."""
         drivers = ["550.54.15"]
-        node_pairs = {("4230.2.3", "6.1.119")}
-        tracked_pairs = {("4230.2.3", "6.1.119")}
         result = compute_desired(
-            drivers, node_pairs, tracked_pairs, precompile=False
+            drivers, {"4230.2.3"}, {"4230.2.3"}, precompile=False
         )
         assert len(result) == 1
 
 
 class TestComputeDesiredPrecompile:
-    def test_two_drivers_two_pairs(self):
+    def test_two_drivers_two_flatcars(self):
         drivers = ["550.54.15", "535.183.01"]
-        node_pairs = {
-            ("4230.2.3", "6.1.119"),
-            ("4081.2.0", "6.1.84"),
-        }
-        tracked_pairs: set[tuple[str, str]] = set()
+        node_flatcars = {"4230.2.3", "4081.2.0"}
         result = compute_desired(
-            drivers, node_pairs, tracked_pairs, precompile=True
+            drivers, node_flatcars, set(), precompile=True
         )
         assert len(result) == 4
-        # All kernel fields must be set.
-        assert all(k.kernel is not None for k in result)
+        assert all(k.precompile is True for k in result)
         for driver in drivers:
-            assert BuildKey(driver, "4230.2.3", "6.1.119") in result
-            assert BuildKey(driver, "4081.2.0", "6.1.84") in result
-
-    def test_same_flatcar_different_kernel_kept_separately(self):
-        """In precompile mode, same flatcar but different kernels → 2 keys."""
-        drivers = ["550.54.15"]
-        node_pairs = {("4230.2.3", "6.1.119")}
-        tracked_pairs = {("4230.2.3", "6.1.120")}
-        result = compute_desired(
-            drivers, node_pairs, tracked_pairs, precompile=True
-        )
-        assert len(result) == 2
+            assert BuildKey(driver, "4230.2.3", True) in result
+            assert BuildKey(driver, "4081.2.0", True) in result
 
 
 # ---------------------------------------------------------------------------
@@ -193,17 +185,30 @@ PRECOMPILE_TAG_CASES = [
 class TestTagRoundTrips:
     @pytest.mark.parametrize("driver,flatcar", RUNTIME_TAG_CASES)
     def test_runtime_roundtrip(self, driver, flatcar):
-        key = BuildKey(driver=driver, flatcar=flatcar, kernel=None)
+        key = BuildKey(driver=driver, flatcar=flatcar, precompile=False)
         tag = runtime_tag(key)
         recovered = parse_runtime_tag(tag)
         assert recovered == key
 
     @pytest.mark.parametrize("driver,flatcar,kernel", PRECOMPILE_TAG_CASES)
-    def test_precompile_roundtrip(self, driver, flatcar, kernel):
-        key = BuildKey(driver=driver, flatcar=flatcar, kernel=kernel)
-        tag = precompile_tag(key)
+    def test_precompile_parse(self, driver, flatcar, kernel):
+        tag = f"{driver}-{kernel}-flatcar{flatcar}"
         recovered = parse_precompile_tag(tag)
-        assert recovered == key
+        assert recovered is not None
+        assert recovered.driver == driver
+        assert recovered.flatcar == flatcar
+        assert recovered.precompile is True
+
+    @pytest.mark.parametrize("driver,flatcar,kernel", PRECOMPILE_TAG_CASES)
+    def test_matches_precompile_tag(self, driver, flatcar, kernel):
+        tag = f"{driver}-{kernel}-flatcar{flatcar}"
+        key = BuildKey(driver=driver, flatcar=flatcar, precompile=True)
+        assert matches_precompile_tag(key, tag)
+
+    @pytest.mark.parametrize("driver,flatcar,kernel", PRECOMPILE_TAG_CASES)
+    def test_extract_kernel_from_precompile_tag(self, driver, flatcar, kernel):
+        tag = f"{driver}-{kernel}-flatcar{flatcar}"
+        assert extract_kernel_from_precompile_tag(tag) == kernel
 
     def test_runtime_parse_invalid_returns_none(self):
         assert parse_runtime_tag("notavalidtag") is None
@@ -214,10 +219,15 @@ class TestTagRoundTrips:
         assert parse_precompile_tag("notavalidtag") is None
         assert parse_precompile_tag("") is None
 
-    def test_precompile_tag_requires_kernel(self):
-        key = BuildKey(driver="550.54.15", flatcar="4230.2.3", kernel=None)
-        with pytest.raises(ValueError):
-            precompile_tag(key)
+    def test_matches_precompile_tag_wrong_driver(self):
+        key = BuildKey(driver="550.54.15", flatcar="4230.2.3", precompile=True)
+        tag = "535.183.01-6.1.119-flatcar4230.2.3"
+        assert not matches_precompile_tag(key, tag)
+
+    def test_matches_precompile_tag_wrong_flatcar(self):
+        key = BuildKey(driver="550.54.15", flatcar="4230.2.3", precompile=True)
+        tag = "550.54.15-6.1.119-flatcar4081.2.0"
+        assert not matches_precompile_tag(key, tag)
 
 
 # ---------------------------------------------------------------------------
@@ -226,37 +236,40 @@ class TestTagRoundTrips:
 
 
 class TestComputeMissing:
-    def test_filters_existing_tags(self):
+    def test_filters_existing_runtime_tags(self):
         desired = {
-            BuildKey("550.54.15", "4230.2.3"),
-            BuildKey("550.54.15", "4081.2.0"),
+            BuildKey("550.54.15", "4230.2.3", False),
+            BuildKey("550.54.15", "4081.2.0", False),
         }
         existing = {"550.54.15-flatcar4230.2.3"}
         missing = compute_missing(desired, existing, set(), precompile=False)
-        assert missing == {BuildKey("550.54.15", "4081.2.0")}
+        assert missing == {BuildKey("550.54.15", "4081.2.0", False)}
 
     def test_filters_in_flight(self):
-        desired = {BuildKey("550.54.15", "4230.2.3")}
-        in_flight = {BuildKey("550.54.15", "4230.2.3")}
+        desired = {BuildKey("550.54.15", "4230.2.3", False)}
+        in_flight = {BuildKey("550.54.15", "4230.2.3", False)}
         missing = compute_missing(desired, set(), in_flight, precompile=False)
         assert missing == set()
 
     def test_all_missing(self):
         desired = {
-            BuildKey("550.54.15", "4230.2.3"),
-            BuildKey("550.54.15", "4081.2.0"),
+            BuildKey("550.54.15", "4230.2.3", False),
+            BuildKey("550.54.15", "4081.2.0", False),
         }
         missing = compute_missing(desired, set(), set(), precompile=False)
         assert missing == desired
 
-    def test_precompile_mode(self):
-        key = BuildKey("550.54.15", "4230.2.3", "6.1.119")
-        tag = precompile_tag(key)
+    def test_precompile_existing_tag_skips_build(self):
+        key = BuildKey("550.54.15", "4230.2.3", True)
+        # Tag contains kernel version discovered at build time.
+        existing = {"550.54.15-6.1.119-flatcar4230.2.3"}
         desired = {key}
-        # Already built.
-        missing = compute_missing(desired, {tag}, set(), precompile=True)
+        missing = compute_missing(desired, existing, set(), precompile=True)
         assert missing == set()
-        # Not yet built.
+
+    def test_precompile_no_existing_tag_needs_build(self):
+        key = BuildKey("550.54.15", "4230.2.3", True)
+        desired = {key}
         missing = compute_missing(desired, set(), set(), precompile=True)
         assert missing == {key}
 
@@ -268,11 +281,6 @@ class TestComputeMissing:
 
 class TestComputeRetainedFlatcarSet:
     def test_plan_example(self):
-        """The worked example from the spec:
-        nodes {4230.2.3}, tracked {4230.2.4},
-        history {4230.2.2, 4152.2.0, 4081.2.0}, keep=2
-        → {4230.2.4, 4230.2.3, 4230.2.2, 4152.2.0}
-        """
         result = compute_retained_flatcar_set(
             current={"4230.2.3"},
             tracked={"4230.2.4"},
@@ -297,11 +305,9 @@ class TestComputeRetainedFlatcarSet:
             history={"4230.2.2"},
             keep_previous=2,
         )
-        # No highest current → no history added.
         assert result == {"4230.2.4"}
 
     def test_keep_more_than_available(self):
-        """keep_previous > number of older versions → return all older."""
         result = compute_retained_flatcar_set(
             current={"4230.2.3"},
             tracked=set(),
@@ -311,15 +317,12 @@ class TestComputeRetainedFlatcarSet:
         assert "4230.2.1" in result
 
     def test_history_versions_above_current_not_retained(self):
-        """History versions newer than current node version are excluded."""
         result = compute_retained_flatcar_set(
             current={"4230.2.3"},
             tracked=set(),
             history={"4230.2.4", "4230.2.2"},
             keep_previous=2,
         )
-        # 4230.2.4 is newer than current 4230.2.3, should not be in retained
-        # (it's not in history candidates, only current/tracked add those).
         assert "4230.2.4" not in result
         assert "4230.2.2" in result
 
@@ -396,8 +399,7 @@ class TestComputePrunable:
         assert result == {old_tag}
 
     def test_precompile_mode(self):
-        key = BuildKey("550.54.15", "4081.2.0", "6.1.84")
-        tag = precompile_tag(key)
+        tag = "550.54.15-6.1.84-flatcar4081.2.0"
         existing = {tag}
         tag_ages = {tag: _old_ts()}
         retained = set()

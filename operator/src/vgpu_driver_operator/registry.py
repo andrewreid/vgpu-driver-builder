@@ -319,6 +319,27 @@ def parse_dockerconfigjson(blob: bytes | str, registry_host: str) -> RegistryAut
     )
 
 
+def find_matching_tags(
+    repository: str,
+    auth: RegistryAuth | None,
+    prefix: str,
+    suffix: str,
+    *,
+    session: requests.Session | None = None,
+) -> set[str]:
+    """Return tags in *repository* that start with *prefix* and end with *suffix*.
+
+    Used for precompile idempotency: finds tags of the form
+    ``<driver>-<kernel>-flatcar<flatcar>`` without knowing the kernel in advance.
+    Returns an empty set if no tags match or the repository does not exist.
+    """
+    tags = list_tags(repository, auth, session=session)
+    return {
+        t for t in tags
+        if t.startswith(prefix) and t.endswith(suffix) and len(t) > len(prefix) + len(suffix)
+    }
+
+
 def list_tags(
     repository: str,
     auth: RegistryAuth | None,
