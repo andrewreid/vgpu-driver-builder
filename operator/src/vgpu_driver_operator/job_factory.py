@@ -263,6 +263,9 @@ def build_job_manifest(
         "image": buildkit_image,
         "command": ["/bin/sh", "-c", main_command],
         "volumeMounts": volume_mounts,
+        "securityContext": {
+            "privileged": True,
+        },
     }
     if "resources" in build_cfg and build_cfg["resources"]:
         main_container["resources"] = build_cfg["resources"]
