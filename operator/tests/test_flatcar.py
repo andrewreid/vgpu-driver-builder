@@ -103,6 +103,35 @@ class TestFlatcarVersionFromNode:
         # An empty label value means "not set via NFD", fall back
         assert flatcar_version_from_node(node) == "4081.2.0"
 
+    def test_debian_nfd_label_not_mistaken_for_flatcar(self):
+        """Debian 12 node: NFD sets VERSION_ID='12'. Must return None."""
+        node = _node(
+            labels={_NFD_OS_LABEL: "12"},
+            os_image="Debian GNU/Linux 12 (bookworm)",
+        )
+        assert flatcar_version_from_node(node) is None
+
+    def test_k3s_debian_node_returns_none(self):
+        """k3s node running Debian: no Flatcar label, non-Flatcar osImage."""
+        node = _node(os_image="Debian GNU/Linux 12 (bookworm)")
+        assert flatcar_version_from_node(node) is None
+
+    def test_nfd_triple_label_accepted_when_os_image_is_flatcar(self):
+        """NFD label with X.Y.Z format on a Flatcar node is accepted."""
+        node = _node(
+            labels={_NFD_OS_LABEL: "4593.2.0"},
+            os_image="Flatcar Container Linux by Kinvolk 4593.2.0 (Oklo)",
+        )
+        assert flatcar_version_from_node(node) == "4593.2.0"
+
+    def test_nfd_triple_label_with_no_os_image_accepted(self):
+        """NFD label with X.Y.Z format and no osImage is accepted (pure NFD node)."""
+        node = _node(
+            labels={_NFD_OS_LABEL: "4593.2.0"},
+            os_image="",
+        )
+        assert flatcar_version_from_node(node) == "4593.2.0"
+
 
 # ---------------------------------------------------------------------------
 # kernel_version_from_node

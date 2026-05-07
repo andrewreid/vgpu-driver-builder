@@ -21,12 +21,17 @@ _OS_IMAGE_RE = re.compile(
 _NFD_OS_VERSION = "feature.node.kubernetes.io/system-os_release.VERSION_ID"
 _NFD_KERNEL_VERSION = "feature.node.kubernetes.io/kernel-version.full"
 
+# NFD sets VERSION_ID to e.g. "3815.2.0" on Flatcar — the ID label is set
+# only on Flatcar nodes; validate it looks like a Flatcar version triple.
+_FLATCAR_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
+
 
 def parse_flatcar_version_from_os_image(os_image: str) -> str | None:
     """Extract Flatcar version string from a node osImage field.
 
     Returns the version string (e.g. ``"4230.2.3"``) or ``None`` for
-    non-Flatcar OS strings.
+    non-Flatcar OS strings.  The string must explicitly contain "Flatcar"
+    to be accepted — plain version numbers from other distros are rejected.
     """
     if not os_image:
         return None
@@ -39,18 +44,28 @@ def flatcar_version_from_node(node: dict) -> str | None:
 
     Preference order:
     1. NFD label ``feature.node.kubernetes.io/system-os_release.VERSION_ID``
+       (only accepted when it matches the ``X.Y.Z`` Flatcar version pattern
+       AND the osImage also contains "Flatcar", or when no osImage is present
+       but the label looks like a valid triple — conservative: we also check
+       the osImage does not indicate a different OS).
     2. Parse ``node.status.nodeInfo.osImage``
 
     Returns ``None`` if the node is not running Flatcar.
     """
     labels: dict = (node.get("metadata") or {}).get("labels") or {}
-    nfd_val = labels.get(_NFD_OS_VERSION)
-    if nfd_val:
-        return nfd_val
-
     os_image: str = (
         (node.get("status") or {}).get("nodeInfo") or {}
     ).get("osImage", "")
+
+    # Only trust the NFD VERSION_ID label when the osImage also confirms this
+    # is a Flatcar node (or osImage is absent).  This prevents a Debian node
+    # whose VERSION_ID="12" from being mistaken for Flatcar version "12".
+    nfd_val = labels.get(_NFD_OS_VERSION)
+    if nfd_val and _FLATCAR_VERSION_RE.match(nfd_val):
+        # Confirm via osImage: either no osImage, or osImage contains "Flatcar".
+        if not os_image or "flatcar" in os_image.lower():
+            return nfd_val
+
     return parse_flatcar_version_from_os_image(os_image)
 
 

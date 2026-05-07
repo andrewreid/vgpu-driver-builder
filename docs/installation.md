@@ -262,7 +262,8 @@ See the [VGPUDriverImage CRD definition](../charts/vgpu-driver-operator/crds/vgp
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `flatcar.discoverFromNodes` | bool | `true` | Watch cluster nodes for Flatcar versions. |
+| `flatcar.discoverFromNodes` | bool | `true` | Watch cluster nodes for Flatcar versions. Set to `false` on non-Flatcar clusters. |
+| `flatcar.versions` | `string[]` | (none) | Explicit Flatcar versions to build for (e.g. `["4593.2.0"]`). Unioned with `trackChannels` and discovered versions. |
 | `flatcar.nodeSelector` | object | (none) | Label selector to filter nodes when discovering. |
 | `flatcar.trackChannels` | `string[]` | (none) | Flatcar channels to track: `stable`, `lts`, `beta`, `alpha`. |
 | `flatcar.arch` | string | `amd64` | CPU architecture for release lookups. |
@@ -355,6 +356,37 @@ spec:
     enabled: true
     keepPreviousFlatcarVersions: 2
     minAgeBeforeDelete: "168h"
+```
+
+### Example: non-Flatcar test cluster (explicit versions)
+
+On a k3s or other non-Flatcar cluster you can pin explicit Flatcar versions
+instead of relying on node discovery. The operator will build against those
+versions as long as the corresponding `flatcar-developer:<version>-sources`
+base image exists.
+
+```yaml
+apiVersion: vgpu.flatcar.io/v1alpha1
+kind: VGPUDriverImage
+metadata:
+  name: vgpu-test-535
+  namespace: vgpu-driver-operator
+spec:
+  driverVersions: ["535.261.03"]
+  source:
+    type: s3
+    uriTemplate: s3://vgpu-drivers/NVIDIA-Linux-x86_64-${DRIVER_VERSION}-grid.run
+    credentialsSecretRef:
+      name: s3-driver-storage-secret
+  registry:
+    repository: registry.example.com/vgpu-driver
+    cacheRepository: registry.example.com/vgpu-driver-cache
+  flatcar:
+    discoverFromNodes: false          # cluster is not running Flatcar
+    versions: ["4593.2.0"]           # explicit Flatcar version to build for
+  precompile: true
+  retention:
+    enabled: false
 ```
 
 Then apply:

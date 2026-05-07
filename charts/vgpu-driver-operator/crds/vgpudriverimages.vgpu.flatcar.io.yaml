@@ -115,6 +115,16 @@ spec:
                       type: object
                       additionalProperties:
                         type: string
+                    versions:
+                      description: >
+                        Explicit list of Flatcar versions to build for (in
+                        addition to trackChannels and discoverFromNodes
+                        results). Useful for non-Flatcar clusters or when
+                        pinning to a specific release.
+                      type: array
+                      items:
+                        type: string
+                        pattern: '^[0-9]+\.[0-9]+\.[0-9]+$'
                     trackChannels:
                       description: Flatcar release channels to track for new versions.
                       type: array

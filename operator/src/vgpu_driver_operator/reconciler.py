@@ -136,6 +136,7 @@ def compute_desired(
     tracked_pairs: set[tuple[str, str]],
     *,
     precompile: bool,
+    explicit_versions: list[str] | None = None,
 ) -> set[BuildKey]:
     """Compute the complete set of build keys that *should* exist.
 
@@ -145,23 +146,43 @@ def compute_desired(
         List of NVIDIA driver version strings from the CRD spec.
     node_pairs:
         Set of ``(flatcar_version, kernel_version)`` tuples observed on nodes.
+        Should be empty when ``discoverFromNodes`` is false.
     tracked_pairs:
         Set of ``(flatcar_version, kernel_version)`` tuples from channel
         poller.
     precompile:
         When ``True`` build precompiled images keyed by kernel; otherwise
         runtime images (kernel is ignored).
+    explicit_versions:
+        Optional list of Flatcar version strings from ``spec.flatcar.versions``.
+        These are treated as kernel=None pairs in runtime mode, and skipped
+        in precompile mode (kernel is required for precompile — those come
+        from node_pairs and tracked_pairs).
     """
     all_pairs: set[tuple[str, str]] = node_pairs | tracked_pairs
+
+    # Add explicit versions as (flatcar, kernel=None) pairs — they contribute
+    # to runtime builds. For precompile mode, explicit versions without a
+    # known kernel cannot produce a precompile tag, so we skip them there.
+    explicit_flatcars: set[str] = set(explicit_versions or [])
 
     result: set[BuildKey] = set()
     for driver in driver_versions:
         if precompile:
             for flatcar, kernel in all_pairs:
                 result.add(BuildKey(driver=driver, flatcar=flatcar, kernel=kernel))
+            # Explicit versions in precompile mode: if the flatcar appears in
+            # all_pairs we already have it; otherwise emit a kernel=None key so
+            # that the reconciler can still surface a build status entry (the
+            # job_factory will need to handle kernel=None in precompile mode,
+            # which is a separate concern — for now we include them).
+            tracked_flatcars = {fc for fc, _ in all_pairs}
+            for flatcar in explicit_flatcars:
+                if flatcar not in tracked_flatcars:
+                    result.add(BuildKey(driver=driver, flatcar=flatcar, kernel=None))
         else:
             # Deduplicate by flatcar version — kernel is irrelevant for runtime.
-            seen_flatcar = {fc for fc, _ in all_pairs}
+            seen_flatcar = {fc for fc, _ in all_pairs} | explicit_flatcars
             for flatcar in seen_flatcar:
                 result.add(BuildKey(driver=driver, flatcar=flatcar, kernel=None))
     return result

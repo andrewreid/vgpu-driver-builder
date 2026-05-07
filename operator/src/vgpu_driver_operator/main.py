@@ -285,34 +285,40 @@ def _do_reconcile(
     # --- 1. Collect node pairs ---
     flatcar_cfg: dict = spec.get("flatcar") or {}
     node_selector: dict = flatcar_cfg.get("nodeSelector") or {}
-
-    label_selector = ",".join(f"{k}={v}" for k, v in node_selector.items()) or None
-    try:
-        nodes_resp = core_api.list_node(label_selector=label_selector)
-        nodes = [n.to_dict() for n in nodes_resp.items]
-    except Exception as exc:
-        logger.warning("reconcile: failed to list nodes: %s", exc)
-        nodes = []
+    # discoverFromNodes defaults to True for backward-compat but can be disabled.
+    discover_from_nodes: bool = flatcar_cfg.get("discoverFromNodes", True)
 
     node_pairs: set[tuple[str, str]] = set()
     observed_nodes: list[dict] = []
-    for node in nodes:
-        fv = _flatcar.flatcar_version_from_node(node)
-        kv = _flatcar.kernel_version_from_node(node)
-        if fv and kv:
-            node_pairs.add((fv, kv))
 
-    # Build observedNodes (deduplicated by (flatcar, kernel), with nodeCount).
-    pair_counts: dict[tuple[str, str], int] = {}
-    for node in nodes:
-        fv = _flatcar.flatcar_version_from_node(node)
-        kv = _flatcar.kernel_version_from_node(node)
-        if fv and kv:
-            pair_counts[(fv, kv)] = pair_counts.get((fv, kv), 0) + 1
-    for (fv, kv), count in pair_counts.items():
-        observed_nodes.append(
-            {"flatcarVersion": fv, "kernelVersion": kv, "nodeCount": count}
-        )
+    if discover_from_nodes:
+        label_selector = ",".join(f"{k}={v}" for k, v in node_selector.items()) or None
+        try:
+            nodes_resp = core_api.list_node(label_selector=label_selector)
+            nodes = [n.to_dict() for n in nodes_resp.items]
+        except Exception as exc:
+            logger.warning("reconcile: failed to list nodes: %s", exc)
+            nodes = []
+
+        for node in nodes:
+            fv = _flatcar.flatcar_version_from_node(node)
+            kv = _flatcar.kernel_version_from_node(node)
+            if fv and kv:
+                node_pairs.add((fv, kv))
+
+        # Build observedNodes (deduplicated by (flatcar, kernel), with nodeCount).
+        pair_counts: dict[tuple[str, str], int] = {}
+        for node in nodes:
+            fv = _flatcar.flatcar_version_from_node(node)
+            kv = _flatcar.kernel_version_from_node(node)
+            if fv and kv:
+                pair_counts[(fv, kv)] = pair_counts.get((fv, kv), 0) + 1
+        for (fv, kv), count in pair_counts.items():
+            observed_nodes.append(
+                {"flatcarVersion": fv, "kernelVersion": kv, "nodeCount": count}
+            )
+    else:
+        logger.debug("reconcile: discoverFromNodes=false, skipping node listing")
 
     # --- 2. Tracked pairs from poller ---
     tracked_entries: list[dict] = (status or {}).get("trackedChannelVersions") or []
@@ -325,8 +331,37 @@ def _do_reconcile(
     # --- 3. Compute desired ---
     driver_versions: list[str] = spec.get("driverVersions") or []
     precompile: bool = bool(spec.get("precompile", False))
+    explicit_versions: list[str] = flatcar_cfg.get("versions") or []
+
+    # Compute union of all flatcar version sources.
+    all_flatcar_versions = (
+        {fc for fc, _ in node_pairs}
+        | {fc for fc, _ in tracked_pairs}
+        | set(explicit_versions)
+    )
+    if not all_flatcar_versions:
+        logger.warning(
+            "reconcile: no Flatcar versions found; set spec.flatcar.versions, "
+            "trackChannels, or discoverFromNodes with Flatcar nodes"
+        )
+        no_versions_condition = {
+            "type": "Reconciled",
+            "status": "False",
+            "reason": "NoFlatcarVersions",
+            "message": (
+                "No Flatcar versions available. Set at least one of: "
+                "spec.flatcar.versions, spec.flatcar.trackChannels, or "
+                "spec.flatcar.discoverFromNodes=true with Flatcar nodes present."
+            ),
+            "lastTransitionTime": now_str,
+        }
+        patch.status.update({"conditions": [no_versions_condition], "observedNodes": observed_nodes})
+        return
+
     desired = _reconciler.compute_desired(
-        driver_versions, node_pairs, tracked_pairs, precompile=precompile
+        driver_versions, node_pairs, tracked_pairs,
+        precompile=precompile,
+        explicit_versions=explicit_versions,
     )
 
     # --- 4. Auth + existing tags ---

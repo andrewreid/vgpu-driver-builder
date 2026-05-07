@@ -46,6 +46,9 @@
             ],
             "image": "moby/buildkit:rootless",
             "name": "buildkit",
+            "securityContext": {
+              "privileged": true
+            },
             "volumeMounts": [
               {
                 "mountPath": "/workspace",

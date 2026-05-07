@@ -21,6 +21,82 @@ from vgpu_driver_operator.reconciler import (
 # ---------------------------------------------------------------------------
 
 
+class TestComputeDesiredExplicitVersions:
+    def test_explicit_versions_runtime(self):
+        """explicit_versions contributes flatcar versions in runtime mode."""
+        drivers = ["550.54.15"]
+        result = compute_desired(
+            drivers,
+            node_pairs=set(),
+            tracked_pairs=set(),
+            precompile=False,
+            explicit_versions=["4593.2.0"],
+        )
+        assert result == {BuildKey(driver="550.54.15", flatcar="4593.2.0", kernel=None)}
+
+    def test_explicit_versions_dedup_with_tracked(self):
+        """Same flatcar from explicit + tracked → one key per driver in runtime."""
+        drivers = ["550.54.15"]
+        result = compute_desired(
+            drivers,
+            node_pairs=set(),
+            tracked_pairs={("4593.2.0", "6.1.100")},
+            precompile=False,
+            explicit_versions=["4593.2.0"],
+        )
+        assert len(result) == 1
+
+    def test_explicit_versions_union_with_tracked(self):
+        """Explicit + tracked are unioned, not intersected."""
+        drivers = ["550.54.15"]
+        result = compute_desired(
+            drivers,
+            node_pairs=set(),
+            tracked_pairs={("4230.2.3", "6.1.119")},
+            precompile=False,
+            explicit_versions=["4593.2.0"],
+        )
+        flatcars = {k.flatcar for k in result}
+        assert "4230.2.3" in flatcars
+        assert "4593.2.0" in flatcars
+
+    def test_explicit_versions_precompile_no_kernel(self):
+        """Explicit version with no matching tracked pair → kernel=None key."""
+        drivers = ["550.54.15"]
+        result = compute_desired(
+            drivers,
+            node_pairs=set(),
+            tracked_pairs=set(),
+            precompile=True,
+            explicit_versions=["4593.2.0"],
+        )
+        assert BuildKey(driver="550.54.15", flatcar="4593.2.0", kernel=None) in result
+
+    def test_empty_explicit_versions_no_effect(self):
+        """empty explicit_versions → same as not passing it."""
+        drivers = ["550.54.15"]
+        result = compute_desired(
+            drivers,
+            node_pairs={("4230.2.3", "6.1.119")},
+            tracked_pairs=set(),
+            precompile=False,
+            explicit_versions=[],
+        )
+        assert result == {BuildKey(driver="550.54.15", flatcar="4230.2.3", kernel=None)}
+
+    def test_none_explicit_versions_no_effect(self):
+        """explicit_versions=None is equivalent to empty list."""
+        drivers = ["550.54.15"]
+        result = compute_desired(
+            drivers,
+            node_pairs={("4230.2.3", "6.1.119")},
+            tracked_pairs=set(),
+            precompile=False,
+            explicit_versions=None,
+        )
+        assert result == {BuildKey(driver="550.54.15", flatcar="4230.2.3", kernel=None)}
+
+
 class TestComputeDesiredRuntime:
     def test_two_drivers_three_flatcars(self):
         drivers = ["550.54.15", "535.183.01"]
