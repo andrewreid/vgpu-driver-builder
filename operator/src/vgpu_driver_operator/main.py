@@ -332,6 +332,34 @@ def _do_reconcile(
     driver_versions: list[str] = spec.get("driverVersions") or []
     precompile: bool = bool(spec.get("precompile", False))
     explicit_versions: list[str] = flatcar_cfg.get("versions") or []
+    arch: str = flatcar_cfg.get("arch", "amd64")
+
+    # For explicit versions in precompile mode, we need the kernel version.
+    # Try to resolve it from the Flatcar release feed (stable first, then lts).
+    # Already-known versions (from tracked_pairs or node_pairs) are skipped.
+    if precompile and explicit_versions:
+        known_flatcars = {fc for fc, _ in (node_pairs | tracked_pairs)}
+        for ev in explicit_versions:
+            if ev in known_flatcars:
+                continue  # Already have kernel from tracked/node sources.
+            for channel in ("stable", "lts", "beta", "alpha"):
+                try:
+                    kv = _flatcar.kernel_for_release(channel, ev, arch)
+                    tracked_pairs.add((ev, kv))
+                    logger.info(
+                        "reconcile: resolved kernel for explicit version %s "
+                        "via %s channel: %s",
+                        ev, channel, kv,
+                    )
+                    break
+                except _flatcar.FlatcarFeedError:
+                    continue
+            else:
+                logger.warning(
+                    "reconcile: could not resolve kernel for explicit version %s "
+                    "from any channel; will build runtime-mode fallback",
+                    ev,
+                )
 
     # Compute union of all flatcar version sources.
     all_flatcar_versions = (
@@ -493,7 +521,13 @@ def _do_reconcile(
 
     builds: list[dict] = []
     for key in sorted(desired, key=lambda k: (k.driver, k.flatcar, k.kernel or "")):
-        tag = tag_fn(key)
+        # For explicit versions without a known kernel, kernel=None even in
+        # precompile mode — fall back to runtime_tag so we don't raise.
+        effective_tag_fn = (
+            _reconciler.precompile_tag if (precompile and key.kernel is not None)
+            else _reconciler.runtime_tag
+        )
+        tag = effective_tag_fn(key)
         jname = job_key_map.get(key, "")
         if key in built_keys:
             phase = "Ready"
@@ -502,7 +536,7 @@ def _do_reconcile(
         else:
             phase = "Pending"
 
-        mode = "precompiled" if precompile else "compiled"
+        mode = "precompiled" if (precompile and key.kernel is not None) else "compiled"
         entry: dict = {
             "driverVersion": key.driver,
             "flatcarVersion": key.flatcar,
