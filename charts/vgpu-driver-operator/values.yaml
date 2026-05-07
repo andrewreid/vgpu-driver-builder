@@ -5,7 +5,7 @@ image:
   # -- Image tag; defaults to .Chart.AppVersion when empty
   tag: ""
   # -- Kubernetes imagePullPolicy
-  pullPolicy: IfNotPresent
+  pullPolicy: Always
 
 # -- Optional list of image pull secrets for the operator pod
 imagePullSecrets: []
