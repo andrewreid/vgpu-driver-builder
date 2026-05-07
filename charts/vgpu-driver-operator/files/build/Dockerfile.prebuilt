@@ -1,0 +1,147 @@
+# syntax=docker/dockerfile:1.4
+#
+# Userspace deduplication strategy (chosen: copy extracted tree from builder):
+#   The builder stage extracts the .run installer and installs userspace.  The
+#   runtime stage copies the already-extracted installer tree from builder and
+#   runs nvidia-installer against it — no second .run COPY or sh .run -x step.
+#   This saves one large layer and one expensive extraction, while guaranteeing
+#   nvidia-gridd and all companion libraries are installed identically in both
+#   stages.  The alternative (--utility-prefix / --opengl-prefix etc.) was
+#   rejected because nvidia-gridd's library search path assumptions make prefix
+#   installs fragile without thorough testing.
+
+# v0.1.0: amd64 only.
+
+# See Dockerfile for FLATCAR_IMAGE_REF semantics.
+ARG FLATCAR_IMAGE_REPO=ghcr.io/andrewreid/flatcar-developer
+ARG FLATCAR_IMAGE_SUFFIX=-sources
+ARG FLATCAR_VERSION
+ARG FLATCAR_IMAGE_REF=${FLATCAR_IMAGE_REPO}:${FLATCAR_VERSION}${FLATCAR_IMAGE_SUFFIX}
+
+FROM ${FLATCAR_IMAGE_REF} AS builder
+
+SHELL ["/bin/bash", "-c"]
+
+ARG DRIVER_VERSION
+ARG DRIVER_TYPE=vgpu
+ARG VGPU_LICENSE_SERVER_TYPE=NLS
+# KERNEL_VERSION_OVERRIDE is required: the builder must know which kernel to
+# target so it does not have to infer it at image-build time from /usr/lib64/modules.
+ARG KERNEL_VERSION_OVERRIDE
+
+ENV DRIVER_VERSION=${DRIVER_VERSION} \
+    NVIDIA_VISIBLE_DEVICES=void \
+    DRIVER_TYPE=${DRIVER_TYPE} \
+    VGPU_LICENSE_SERVER_TYPE=${VGPU_LICENSE_SERVER_TYPE}
+
+RUN test -n "${KERNEL_VERSION_OVERRIDE:?KERNEL_VERSION_OVERRIDE build-arg required}"
+
+RUN mkdir -p /drivers
+
+COPY NVIDIA-Linux-x86_64-${DRIVER_VERSION}.run /drivers/
+COPY nvidia-driver /usr/local/bin/nvidia-driver
+RUN chmod +x /usr/local/bin/nvidia-driver
+
+# Build precompiled modules using the Flatcar developer toolchain.
+# apt cache mounts avoid re-downloading packages on repeated builds.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    set -euo pipefail \
+    && cd /drivers \
+    && export DRIVER_ARCH="x86_64" \
+    && rm -rf NVIDIA-Linux-${DRIVER_ARCH}-${DRIVER_VERSION}-grid NVIDIA-Linux-${DRIVER_ARCH}-${DRIVER_VERSION} \
+    && sh NVIDIA-Linux-${DRIVER_ARCH}-${DRIVER_VERSION}.run -x \
+    && cd NVIDIA-Linux-${DRIVER_ARCH}-${DRIVER_VERSION}-grid \
+    && ./nvidia-installer --silent \
+         --no-kernel-module \
+         --no-install-compat32-libs \
+         --no-nouveau-check \
+         --no-nvidia-modprobe \
+         --no-rpms \
+         --no-backup \
+         --no-check-for-alternate-installs \
+         --no-libglx-indirect \
+         --no-install-libglvnd \
+         --x-prefix=/tmp/null \
+         --x-module-path=/tmp/null \
+         --x-library-path=/tmp/null \
+         --x-sysconfig-path=/tmp/null \
+    && cd / \
+    && export KERNEL_VERSION_OVERRIDE="${KERNEL_VERSION_OVERRIDE}" \
+    && nvidia-driver build-precompiled \
+    && rm -rf /drivers/NVIDIA-Linux-${DRIVER_ARCH}-${DRIVER_VERSION}.run
+
+# -----------------------------------------------------------------------------
+# Runtime stage: minimal image containing userland + precompiled modules.
+# The already-extracted installer tree is copied from builder; nvidia-installer
+# runs against it without re-extracting the .run (saves one large layer).
+# -----------------------------------------------------------------------------
+
+FROM ubuntu:22.04 AS runtime
+
+SHELL ["/bin/bash", "-c"]
+
+ARG DRIVER_VERSION
+ARG FLATCAR_VERSION
+ARG DRIVER_TYPE=vgpu
+ARG VGPU_LICENSE_SERVER_TYPE=NLS
+ARG GIT_REVISION=""
+ARG BUILD_CREATED=""
+
+ENV DRIVER_VERSION=${DRIVER_VERSION} \
+    NVIDIA_VISIBLE_DEVICES=void \
+    DRIVER_TYPE=${DRIVER_TYPE} \
+    VGPU_LICENSE_SERVER_TYPE=${VGPU_LICENSE_SERVER_TYPE}
+
+# apt cache mounts; omit rm -rf /var/lib/apt/lists/* — cache mount handles eviction.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    set -euo pipefail \
+    && apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+         bash \
+         ca-certificates \
+         kmod \
+         pciutils \
+         util-linux
+
+# Copy the already-extracted installer tree from builder (no second .run needed).
+COPY --from=builder /drivers/NVIDIA-Linux-x86_64-${DRIVER_VERSION}-grid /tmp/NVIDIA-Linux-x86_64-${DRIVER_VERSION}-grid
+
+RUN set -euo pipefail \
+    && cd /tmp/NVIDIA-Linux-x86_64-${DRIVER_VERSION}-grid \
+    && ./nvidia-installer --silent \
+         --no-kernel-module \
+         --no-install-compat32-libs \
+         --no-nouveau-check \
+         --no-nvidia-modprobe \
+         --no-rpms \
+         --no-backup \
+         --no-check-for-alternate-installs \
+         --no-libglx-indirect \
+         --no-install-libglvnd \
+         --x-prefix=/tmp/null \
+         --x-module-path=/tmp/null \
+         --x-library-path=/tmp/null \
+         --x-sysconfig-path=/tmp/null \
+    && cd / \
+    && rm -rf /tmp/NVIDIA-Linux-x86_64-${DRIVER_VERSION}-grid
+
+RUN mkdir -p /opt/nvidia/${DRIVER_VERSION}/lib/modules
+COPY --from=builder /opt/nvidia/${DRIVER_VERSION}/lib/modules /opt/nvidia/${DRIVER_VERSION}/lib/modules
+
+COPY nvidia-driver /usr/local/bin/nvidia-driver
+RUN chmod +x /usr/local/bin/nvidia-driver
+
+# Provide a small metadata surface
+LABEL org.opencontainers.image.title="NVIDIA vGPU driver (Flatcar precompiled)" \
+      org.opencontainers.image.version="${DRIVER_VERSION}" \
+      org.opencontainers.image.revision="${GIT_REVISION}" \
+      org.opencontainers.image.created="${BUILD_CREATED}" \
+      org.opencontainers.image.source="https://github.com/andrewreid/vgpu-driver-builder" \
+      org.opencontainers.image.vendor="andrewreid" \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.description="Precompiled NVIDIA vGPU driver modules for Flatcar ${FLATCAR_VERSION}" \
+      flatcar.version="${FLATCAR_VERSION}"
+
+ENTRYPOINT ["nvidia-driver"]

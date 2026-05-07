@@ -1,0 +1,502 @@
+#!/bin/bash
+# NVIDIA vGPU driver runtime entrypoint for Flatcar.
+# Modes: `init` (default) loads modules on a node; `build-precompiled` produces
+# precompiled modules baked into a container image at build time.
+set -euo pipefail
+
+RUN_DIR=/run/nvidia
+PID_FILE=${RUN_DIR}/${0##*/}.pid
+DRIVER_VERSION=${DRIVER_VERSION:?Missing DRIVER_VERSION env var}
+NVIDIA_KMODS_DIR=/opt/nvidia/${DRIVER_VERSION}
+
+_log() {
+    local lvl="$1"; shift
+    printf '%s [%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${lvl}" "$*"
+}
+
+_detect_driver_arch() {
+    case "$1" in
+        x86_64|amd64)  echo "x86_64" ;;
+        aarch64|arm64) echo "aarch64" ;;
+        *)             echo "x86_64" ;;
+    esac
+}
+
+# vGPU settings and architecture helpers
+TARGETARCH=${TARGETARCH:-}
+if [ -z "${TARGETARCH}" ]; then
+    DRIVER_ARCH=$(_detect_driver_arch "$(uname -m)")
+else
+    DRIVER_ARCH=${TARGETARCH/amd64/x86_64}
+    DRIVER_ARCH=${DRIVER_ARCH/arm64/aarch64}
+fi
+
+DRIVER_TYPE=${DRIVER_TYPE:-vgpu}
+VGPU_LICENSE_SERVER_TYPE=${VGPU_LICENSE_SERVER_TYPE:-NLS}
+
+# Ensure sbin paths are on PATH for modprobe/depmod/losetup.
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}
+
+# _extract_userspace: extract NVIDIA .run installer and stage userspace + sources.
+# Idempotent: no-op if /usr/src/nvidia-${DRIVER_VERSION}/mkprecompiled already exists.
+# Required: /drivers/NVIDIA-Linux-${DRIVER_ARCH}-${DRIVER_VERSION}.run present.
+_extract_userspace() {
+    if [ -e "/usr/src/nvidia-${DRIVER_VERSION}/mkprecompiled" ]; then
+        return 0
+    fi
+
+    local run_file="/drivers/NVIDIA-Linux-${DRIVER_ARCH}-${DRIVER_VERSION}.run"
+    if [ ! -f "${run_file}" ]; then
+        _log INFO "NVIDIA installer payload missing at ${run_file}; assuming userspace already bundled"
+        return 0
+    fi
+
+    _log INFO "Extracting NVIDIA userspace components for ${DRIVER_VERSION}"
+    cd /drivers
+    sh "NVIDIA-Linux-${DRIVER_ARCH}-${DRIVER_VERSION}.run" -x
+    cd "NVIDIA-Linux-${DRIVER_ARCH}-${DRIVER_VERSION}-grid"
+    ./nvidia-installer --silent \
+        --no-kernel-module \
+        --no-nouveau-check \
+        --no-nvidia-modprobe \
+        --no-rpms \
+        --no-backup \
+        --no-check-for-alternate-installs \
+        --no-libglx-indirect \
+        --no-install-libglvnd \
+        --x-prefix=/tmp/null \
+        --x-module-path=/tmp/null \
+        --x-library-path=/tmp/null \
+        --x-sysconfig-path=/tmp/null
+
+    mkdir -p "/usr/src/nvidia-${DRIVER_VERSION}"
+    mv LICENSE mkprecompiled kernel "/usr/src/nvidia-${DRIVER_VERSION}"
+    # shellcheck disable=SC2016
+    # Reason: literal sed expression; $ is sed range, not shell expansion.
+    sed '9,${/^\(kernel\|LICENSE\)/!d}' .manifest > "/usr/src/nvidia-${DRIVER_VERSION}/.manifest"
+    cd /
+}
+
+_prepare_kernel_env() {
+    _log INFO "Preparing Flatcar kernel environment for ${KERNEL_VERSION}"
+
+    if [ -z "${KERNEL_VERSION:-}" ]; then
+        _log ERROR "KERNEL_VERSION env var not set"
+        return 1
+    fi
+
+    local linux_src=""
+    if [ -d /usr/src/linux ]; then
+        linux_src=/usr/src/linux
+    else
+        linux_src=$(find /usr/src -maxdepth 1 -type d -name 'linux-*' | sort | head -n1)
+        if [ -n "${linux_src}" ] && [ ! -d /usr/src/linux ]; then
+            ln -s "${linux_src}" /usr/src/linux
+            linux_src=/usr/src/linux
+        fi
+    fi
+
+    if [ -z "${linux_src}" ] || [ ! -d "${linux_src}" ]; then
+        _log ERROR "Unable to locate Flatcar kernel sources under /usr/src"
+        return 1
+    fi
+
+    local kernel_dir=""
+    local candidate_root
+    for candidate_root in /lib/modules /usr/lib64/modules; do
+        if [ -d "${candidate_root}/${KERNEL_VERSION}" ]; then
+            kernel_dir="${candidate_root}/${KERNEL_VERSION}"
+            break
+        fi
+    done
+
+    if [ -z "${kernel_dir}" ]; then
+        _log ERROR "Kernel ${KERNEL_VERSION} not found in prebuilt Flatcar image"
+        _log ERROR "Available kernels:"
+        ls -1 /usr/lib64/modules 2>/dev/null >&2 || true
+        ls -1 /lib/modules 2>/dev/null >&2 || true
+        return 1
+    fi
+
+    if [ "${kernel_dir}" != "/lib/modules/${KERNEL_VERSION}" ]; then
+        rm -rf "/lib/modules/${KERNEL_VERSION}"
+        mkdir -p /lib/modules
+        cp -a "${kernel_dir}" "/lib/modules/${KERNEL_VERSION}"
+    fi
+
+    local kernel_tree="/lib/modules/${KERNEL_VERSION}"
+    local kernel_build_real=""
+    local kernel_source_real=""
+    if [ -e "${kernel_tree}/build" ]; then
+        kernel_build_real=$(readlink -f "${kernel_tree}/build" 2>/dev/null || true)
+    fi
+    if [ -e "${kernel_tree}/source" ]; then
+        kernel_source_real=$(readlink -f "${kernel_tree}/source" 2>/dev/null || true)
+    fi
+
+    # Best-effort: copy .config / Module.symvers from real kernel build dir.
+    # The destination is created as a symlink target above, so failures here
+    # mean the kernel tree is incomplete — surface but do not abort yet; the
+    # explicit `.config` check below is the hard gate.
+    if [ -n "${kernel_build_real}" ] && [ -f "${kernel_build_real}/.config" ]; then
+        cp "${kernel_build_real}/.config" /usr/src/linux/
+    elif [ -n "${kernel_source_real}" ] && [ -f "${kernel_source_real}/.config" ]; then
+        cp "${kernel_source_real}/.config" /usr/src/linux/
+    fi
+    if [ -n "${kernel_build_real}" ] && [ -f "${kernel_build_real}/Module.symvers" ]; then
+        cp "${kernel_build_real}/Module.symvers" /usr/src/linux/
+    elif [ -n "${kernel_source_real}" ] && [ -f "${kernel_source_real}/Module.symvers" ]; then
+        cp "${kernel_source_real}/Module.symvers" /usr/src/linux/
+    fi
+
+    if [ ! -s /usr/src/linux/.config ]; then
+        _log ERROR "Flatcar kernel .config not found; aborting before modules_prepare"
+        return 1
+    fi
+
+    ln -sf /usr/src/linux "${kernel_tree}/build"
+    ln -sf /usr/src/linux "${kernel_tree}/source"
+
+    # modules_prepare must succeed: silent failure here produces broken modules
+    # that fail at modprobe time with confusing errors.
+    make -s -C /usr/src/linux modules_prepare
+    mkdir -p /usr/src/linux/proc
+    cp /proc/version /usr/src/linux/proc/ 2>/dev/null || true
+    # depmod is best-effort post-stage; the real depmod runs after modules are linked.
+    depmod "${KERNEL_VERSION}" || _log WARN "depmod stage 1 failed (continuing)"
+
+    local module_lds_path=""
+    if [ -n "${kernel_build_real}" ] && [ -f "${kernel_build_real}/scripts/module.lds" ]; then
+        module_lds_path="${kernel_build_real}/scripts/module.lds"
+    elif [ -n "${kernel_source_real}" ] && [ -f "${kernel_source_real}/scripts/module.lds" ]; then
+        module_lds_path="${kernel_source_real}/scripts/module.lds"
+    elif [ -f "/lib/modules/${KERNEL_VERSION}/build/scripts/module.lds" ]; then
+        module_lds_path="/lib/modules/${KERNEL_VERSION}/build/scripts/module.lds"
+    fi
+    if [ -n "${module_lds_path}" ]; then
+        cp "${module_lds_path}" "/usr/src/nvidia-${DRIVER_VERSION}/kernel/module.lds"
+    fi
+
+    cd "/usr/src/nvidia-${DRIVER_VERSION}/kernel"
+    local threads
+    threads=$(nproc 2>/dev/null || echo 4)
+    export IGNORE_CC_MISMATCH=1
+    export IGNORE_MISSING_MODULE_SYMVERS=1
+    # NVIDIA-prescribed pre-link of intermediate objects; failures here are
+    # caught downstream when ld -r is invoked, so allow continuation only with
+    # a logged warning.
+    make -j "${threads}" "SYSSRC=/lib/modules/${KERNEL_VERSION}/source" \
+        nv-linux.o nv-modeset-linux.o \
+        || _log WARN "intermediate kernel object pre-link failed (continuing)"
+}
+
+# _should_build_driver_package: returns 0 when _create_driver_package should run.
+# Inspects existing precompiled/*/nvidia-modules* dirs; returns 1 when a present
+# package fails to match the running kernel (operator already shipped one — do
+# not overwrite). Returns 0 if no precompiled dirs exist OR all match.
+_should_build_driver_package() (
+    cd "/usr/src/nvidia-${DRIVER_VERSION}/kernel"
+    local proc_mount_arg=""
+    if [ "${KERNEL_VERSION}" != "$(uname -r)" ]; then
+        proc_mount_arg="--proc-mount-point /usr/src/linux/proc"
+    fi
+    local pkg_name
+    for pkg_name in precompiled/*/nvidia-modules*; do
+        [ -e "${pkg_name}" ] || continue
+        # shellcheck disable=SC2086
+        # Reason: proc_mount_arg expands to two tokens or empty; intentional split.
+        if ! ../mkprecompiled --match "${pkg_name}" ${proc_mount_arg} > /dev/null; then
+            _log INFO "Existing precompiled package does not match kernel: ${pkg_name##*/}"
+            return 1
+        fi
+    done
+    return 0
+)
+
+_create_driver_package() (
+    local pkg_name="nvidia-modules-${KERNEL_VERSION%%-*}${PACKAGE_TAG:+-${PACKAGE_TAG}}"
+    local nvidia_sign_args=""
+    local nvidia_modeset_sign_args=""
+    local nvidia_uvm_sign_args=""
+
+    cd "/usr/src/nvidia-${DRIVER_VERSION}/kernel"
+
+    _log INFO "Building NVIDIA driver package ${pkg_name}"
+    # shellcheck disable=SC2086
+    # Reason: *_sign_args may be empty or multi-token; intentional word splitting.
+    ../mkprecompiled --pack "${pkg_name}" --description "${KERNEL_VERSION}" \
+                     --proc-mount-point /usr/src/linux/proc \
+                     --driver-version "${DRIVER_VERSION}" \
+                     --kernel-interface nv-linux.o \
+                     --linked-module-name nvidia.ko \
+                     --core-object-name nvidia/nv-kernel.o_binary \
+                     ${nvidia_sign_args} \
+                     --target-directory . \
+                     --kernel-interface nv-modeset-linux.o \
+                     --linked-module-name nvidia-modeset.ko \
+                     --core-object-name nvidia-modeset/nv-modeset-kernel.o_binary \
+                     ${nvidia_modeset_sign_args} \
+                     --target-directory . \
+                     --kernel-module nvidia-uvm.ko \
+                     ${nvidia_uvm_sign_args} \
+                     --target-directory .
+
+    local archive_dir="precompiled/${KERNEL_VERSION}"
+    mkdir -p "${archive_dir}"
+    mv "${pkg_name}" "${archive_dir}"
+    local kmods="nvidia nvidia-uvm nvidia-modeset nvidia-drm"
+    local m
+    for m in ${kmods}; do
+       cp "${m}.mod.o" "${archive_dir}"
+       rm -f "${m}.ko"
+    done
+    cp modules.order "${archive_dir}"
+    _log INFO "Packaged precompiled driver into ${PWD}/${archive_dir}"
+)
+
+_load_driver() {
+    _log INFO "Loading NVIDIA driver kernel modules"
+    if ! modprobe -d "${NVIDIA_KMODS_DIR}" -a nvidia nvidia-uvm nvidia-modeset; then
+        _log ERROR "modprobe failed for NVIDIA kernel modules"
+        return 1
+    fi
+    if ! nvidia-persistenced --persistence-mode; then
+        _log ERROR "nvidia-persistenced failed to start"
+        return 1
+    fi
+
+    if [ "${DRIVER_TYPE}" = "vgpu" ]; then
+        _log INFO "Configuring vGPU user-space services"
+        if [ -f /drivers/gridd.conf ]; then
+            mkdir -p /etc/nvidia
+            cp /drivers/gridd.conf /etc/nvidia/gridd.conf
+        fi
+        if [ "${VGPU_LICENSE_SERVER_TYPE}" = "NLS" ] && [ -d /drivers/ClientConfigToken ]; then
+            mkdir -p /etc/nvidia/ClientConfigToken/
+            cp /drivers/ClientConfigToken/* /etc/nvidia/ClientConfigToken/
+        fi
+        _log INFO "Starting nvidia-gridd"
+        # gridd backgrounds itself; failure to launch is non-fatal here because
+        # the daemon may already be active. License renewal runs separately.
+        LD_LIBRARY_PATH="/usr/lib/${DRIVER_ARCH}-linux-gnu/nvidia/gridd" nvidia-gridd \
+            || _log WARN "nvidia-gridd launch returned non-zero"
+        _start_vgpu_topology_daemon || true
+    fi
+}
+
+_unload_driver() {
+    _log INFO "Stopping NVIDIA persistence daemon"
+    if [ -f /var/run/nvidia-persistenced/nvidia-persistenced.pid ]; then
+        local pid
+        pid=$(< /var/run/nvidia-persistenced/nvidia-persistenced.pid)
+        kill -SIGTERM "${pid}" || true
+    fi
+    _log INFO "Unloading NVIDIA driver kernel modules"
+    rmmod nvidia-modeset nvidia-uvm nvidia 2>/dev/null || true
+    return 0
+}
+
+_mount_rootfs() {
+    _log INFO "Mounting NVIDIA driver rootfs"
+    mount --make-runbindable /sys
+    mount --make-private /sys
+    mkdir -p "${RUN_DIR}/driver"
+    mount --rbind / "${RUN_DIR}/driver"
+}
+
+_unmount_rootfs() {
+    _log INFO "Unmounting NVIDIA driver rootfs"
+    if findmnt -r -o TARGET | grep "${RUN_DIR}/driver" > /dev/null; then
+        umount -l -R "${RUN_DIR}/driver"
+    fi
+}
+
+_shutdown() {
+    _unload_driver || true
+    _unmount_rootfs || true
+    rm -f "${PID_FILE}" || true
+}
+
+_start_vgpu_topology_daemon() {
+    type nvidia-topologyd > /dev/null 2>&1 || return 0
+    _log INFO "Starting nvidia-topologyd"
+    nvidia-topologyd
+}
+
+_precompiled_modules_available() {
+    local install_dir="${NVIDIA_KMODS_DIR}/lib/modules/${KERNEL_VERSION}"
+    if [ -d "${install_dir}" ] && ls "${install_dir}"/*.ko > /dev/null 2>&1; then
+        return 0
+    fi
+    return 1
+}
+
+_sync_modules_to_host() {
+    local src_dir="$1"
+    if [ ! -d "${src_dir}" ]; then
+        _log ERROR "expected module source directory ${src_dir} is missing"
+        return 1
+    fi
+
+    if [ -d "${RUN_DIR}/driver" ]; then
+        local persist_root="${RUN_DIR}/driver/usr/local"
+        local persist_modules_dir="${persist_root}/lib/modules/${KERNEL_VERSION}"
+        mkdir -p "${persist_modules_dir}"
+        local module
+        for module in nvidia nvidia-uvm nvidia-modeset nvidia-drm nvidia-peermem; do
+            if [ -f "${src_dir}/${module}.ko" ]; then
+                cp "${src_dir}/${module}.ko" "${persist_modules_dir}/"
+            fi
+        done
+        if [ -f "${src_dir}/modules.order" ]; then
+            cp "${src_dir}/modules.order" "${persist_modules_dir}/"
+        fi
+        if [ -f "${src_dir}/modules.builtin" ]; then
+            cp "${src_dir}/modules.builtin" "${persist_modules_dir}/"
+        fi
+        depmod -b "${persist_root}" "${KERNEL_VERSION}" \
+            || _log WARN "depmod under ${persist_root} failed"
+
+        local host_modules_dir="${RUN_DIR}/driver/lib/modules/${KERNEL_VERSION}"
+        if mkdir -p "${host_modules_dir}" 2>/dev/null; then
+            for module in nvidia nvidia-uvm nvidia-modeset nvidia-drm nvidia-peermem; do
+                if [ -f "${src_dir}/${module}.ko" ]; then
+                    cp "${src_dir}/${module}.ko" "${host_modules_dir}/"
+                fi
+            done
+            if [ -f "${src_dir}/modules.order" ]; then
+                cp "${src_dir}/modules.order" "${host_modules_dir}/"
+            fi
+            if [ -f "${src_dir}/modules.builtin" ]; then
+                cp "${src_dir}/modules.builtin" "${host_modules_dir}/"
+            fi
+            depmod -b "${RUN_DIR}/driver" "${KERNEL_VERSION}" \
+                || _log WARN "depmod under host root failed"
+        else
+            _log WARN "Unable to stage NVIDIA modules under /lib/modules; relying on /usr/local copy"
+        fi
+    fi
+}
+
+_link_and_install_modules() {
+    local base_dir="/usr/src/nvidia-${DRIVER_VERSION}/kernel"
+    local install_dir="${NVIDIA_KMODS_DIR}/lib/modules/${KERNEL_VERSION}"
+    local pkg_name="nvidia-modules-${KERNEL_VERSION%%-*}${PACKAGE_TAG:+-${PACKAGE_TAG}}"
+    local archive_dir="${base_dir}/precompiled/${KERNEL_VERSION}"
+    local staging_dir="${base_dir}/staging/${KERNEL_VERSION}"
+
+    mkdir -p "${install_dir}" "${staging_dir}"
+    ../mkprecompiled --unpack "${archive_dir}/${pkg_name}" -o "${staging_dir}"
+    cp "${archive_dir}"/*.mod.o "${staging_dir}"
+
+    local ld_bin
+    ld_bin=$(command -v ld || true)
+    if [ -z "${ld_bin}" ]; then
+        _log ERROR "Unable to locate ld in PATH"
+        return 1
+    fi
+
+    cd "${staging_dir}"
+    cp ../../nvidia/nv-kernel.o_binary .
+    cp ../../nvidia-modeset/nv-modeset-kernel.o_binary .
+    _log INFO "Re-linking NVIDIA driver kernel modules"
+    "${ld_bin}" -d -r -T "${base_dir}/module.lds" -o nvidia.ko \
+        ./nv-linux.o ./nv-kernel.o_binary ./nvidia.mod.o
+    "${ld_bin}" -d -r -T "${base_dir}/module.lds" -o nvidia-modeset.ko \
+        ./nv-modeset-linux.o ./nv-modeset-kernel.o_binary nvidia-modeset.mod.o
+
+    cp "${staging_dir}"/*.ko "${install_dir}"
+    cp "${archive_dir}/modules.order" "${install_dir}"
+    if [ -f "/lib/modules/${KERNEL_VERSION}/modules.builtin" ]; then
+        cp "/lib/modules/${KERNEL_VERSION}/modules.builtin" "${install_dir}/"
+    fi
+    depmod -b "${NVIDIA_KMODS_DIR}" "${KERNEL_VERSION}"
+    cd /
+}
+
+build_precompiled() {
+    : "${KERNEL_VERSION_OVERRIDE:?KERNEL_VERSION_OVERRIDE required for build-precompiled}"
+    _log INFO "Building precompiled NVIDIA driver image artifacts for ${KERNEL_VERSION}"
+
+    rm -rf "/drivers/NVIDIA-Linux-${DRIVER_ARCH}-${DRIVER_VERSION}" \
+           "/drivers/NVIDIA-Linux-${DRIVER_ARCH}-${DRIVER_VERSION}-grid" 2>/dev/null || true
+
+    _extract_userspace
+    _prepare_kernel_env
+    if _should_build_driver_package; then
+        _create_driver_package
+    fi
+
+    _log INFO "Staging precompiled NVIDIA kernel modules"
+    _link_and_install_modules
+    _log INFO "Precompiled artifacts populated under ${NVIDIA_KMODS_DIR}/lib/modules/${KERNEL_VERSION}"
+}
+
+init() {
+    : "${KERNEL_VERSION:?Missing KERNEL_VERSION env var}"
+    printf "\n========== NVIDIA Software Installer ==========\n"
+    printf "Starting installation of NVIDIA driver version %s for Linux kernel version %s\n" \
+        "${DRIVER_VERSION}" "${KERNEL_VERSION}"
+
+    exec 3> "${PID_FILE}"
+    echo $$ >&3
+    trap "_shutdown" EXIT
+
+    _unload_driver || true
+    _unmount_rootfs || true
+
+    _mount_rootfs
+
+    rm -rf "/drivers/NVIDIA-Linux-${DRIVER_ARCH}-${DRIVER_VERSION}" \
+           "/drivers/NVIDIA-Linux-${DRIVER_ARCH}-${DRIVER_VERSION}-grid" 2>/dev/null || true
+
+    _extract_userspace
+
+    local install_dir="${NVIDIA_KMODS_DIR}/lib/modules/${KERNEL_VERSION}"
+    if _precompiled_modules_available; then
+        _log INFO "Detected precompiled NVIDIA modules for kernel ${KERNEL_VERSION}; skipping build"
+        depmod -b "${NVIDIA_KMODS_DIR}" "${KERNEL_VERSION}" \
+            || _log WARN "depmod over precompiled modules failed"
+        _sync_modules_to_host "${install_dir}"
+    else
+        _prepare_kernel_env
+        if _should_build_driver_package; then
+            _create_driver_package
+        fi
+        _log INFO "Installing NVIDIA driver kernel modules"
+        _link_and_install_modules
+        _sync_modules_to_host "${install_dir}"
+    fi
+
+    _load_driver
+
+    _log INFO "Done, now waiting for signal"
+    sleep infinity &
+    trap '_shutdown && { kill $!; exit 0; }' HUP INT QUIT PIPE TERM
+    trap - EXIT
+    while true; do wait $! || continue; done
+}
+
+# Skip dispatch when sourced for unit tests.
+if [ "${NVIDIA_DRIVER_LIB_ONLY:-0}" = "1" ]; then
+    return 0
+fi
+
+if [ $# -eq 0 ]; then
+    set -- init
+fi
+
+if [ -n "${KERNEL_VERSION_OVERRIDE:-}" ]; then
+    KERNEL_VERSION=${KERNEL_VERSION_OVERRIDE}
+else
+    KERNEL_VERSION=$(uname -r)
+fi
+PACKAGE_TAG=""
+
+command=$1; shift || true
+
+case "${command}" in
+    init)              init ;;
+    build-precompiled) build_precompiled ;;
+    *)                 init ;;
+esac
