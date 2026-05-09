@@ -1,0 +1,25 @@
+# Flux GitRepository pointing at the operator's source repo so HelmRelease can
+# install the chart directly from git. If you maintain an internal mirror,
+# point `url` at that instead and adjust `ref.branch` / `ref.tag` to your
+# pinning policy.
+#
+# ALTERNATIVE: the chart is also published to GHCR as an OCI artifact at
+# `oci://ghcr.io/andrewreid/charts/vgpu-driver-operator`. Replace this
+# GitRepository + the chart.spec.chart reference in helmrelease.yaml with a
+# HelmRepository of type `oci` if you prefer pinned chart versions over
+# git refs.
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: GitRepository
+metadata:
+  name: vgpu-driver-operator
+  namespace: flux-system
+spec:
+  interval: 10m
+  url: https://github.com/andrewreid/vgpu-driver-builder
+  ref:
+    # Pin to a tag in production; `main` is fine for dev clusters.
+    branch: main
+  ignore: |
+    # Limit fetch scope to the chart and CRDs.
+    /*
+    !/charts/vgpu-driver-operator/**

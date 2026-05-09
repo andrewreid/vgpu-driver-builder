@@ -21,12 +21,17 @@ jobs:
         id: version
         shell: bash
         run: |
+          month="$(date -u +'%m')"
+          month="${month#0}"
           calver="$(date -u +'%Y.%m').${GITHUB_RUN_NUMBER}"
+          chart_version="$(date -u +'%Y').${month}.${GITHUB_RUN_NUMBER}"
           owner="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
           image_name="ghcr.io/${owner}/vgpu-driver-operator"
 
           {
+            echo "owner=${owner}"
             echo "calver=${calver}"
+            echo "chart_version=${chart_version}"
             echo "release_tag=v${calver}"
             echo "release_name=${calver}"
             echo "image_name=${image_name}"
@@ -34,6 +39,9 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v5
 
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v4
@@ -64,6 +72,51 @@ jobs:
           provenance: true
           sbom: true
 
+      - name: Helm lint and package
+        shell: bash
+        run: |
+          mkdir -p dist
+          helm lint charts/vgpu-driver-operator
+          helm package charts/vgpu-driver-operator \
+            --destination dist \
+            --version "${{ steps.version.outputs.chart_version }}" \
+            --app-version "${{ steps.version.outputs.release_tag }}"
+          helm show chart "dist/vgpu-driver-operator-${{ steps.version.outputs.chart_version }}.tgz" | tee dist/chart.yaml
+          grep -qx "version: ${{ steps.version.outputs.chart_version }}" dist/chart.yaml
+          grep -qx "appVersion: ${{ steps.version.outputs.release_tag }}" dist/chart.yaml
+
+      - name: Push Helm chart to GHCR OCI
+        id: chart
+        uses: appany/helm-oci-chart-releaser@v0.5.0
+        with:
+          name: vgpu-driver-operator
+          repository: ${{ steps.version.outputs.owner }}/charts
+          tag: ${{ steps.version.outputs.chart_version }}
+          app_version: ${{ steps.version.outputs.release_tag }}
+          path: charts/vgpu-driver-operator
+          registry: ghcr.io
+          registry_username: ${{ github.actor }}
+          registry_password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Prepare release notes
+        shell: bash
+        run: |
+          cat > dist/release-notes.md <<EOF
+          ## Artifacts
+
+          - Operator image: \`${{ steps.version.outputs.image_name }}:${{ steps.version.outputs.release_tag }}\`
+          - Operator image latest: \`${{ steps.version.outputs.image_name }}:latest\`
+          - Helm chart: \`${{ steps.chart.outputs.image }}\`
+
+          ## Install
+
+          \`\`\`bash
+          helm install vgpu-driver-operator \\
+            oci://ghcr.io/${{ steps.version.outputs.owner }}/charts/vgpu-driver-operator \\
+            --version ${{ steps.version.outputs.chart_version }}
+          \`\`\`
+          EOF
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3
         with:
@@ -72,3 +125,6 @@ jobs:
           target_commitish: ${{ github.sha }}
           make_latest: true
           generate_release_notes: true
+          body_path: dist/release-notes.md
+          fail_on_unmatched_files: true
+          files: dist/*.tgz

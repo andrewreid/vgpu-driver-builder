@@ -1,0 +1,67 @@
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: vgpu-driver-operator
+  namespace: vgpu-driver-operator
+spec:
+  interval: 15m
+  releaseName: vgpu-driver-operator
+  targetNamespace: vgpu-driver-operator
+  install:
+    crds: CreateReplace
+    createNamespace: false
+  upgrade:
+    crds: CreateReplace
+    # CRD-managed resources (VGPUDriverImage) survive upgrades; kopf finalizers
+    # are honored.
+    cleanupOnFail: true
+  chart:
+    spec:
+      chart: ./charts/vgpu-driver-operator
+      sourceRef:
+        kind: GitRepository
+        name: vgpu-driver-operator
+        namespace: flux-system
+      reconcileStrategy: ChartVersion
+
+  # Inline value overrides. For sensitive values, prefer `valuesFrom` referencing
+  # a SOPS-decrypted Secret/ConfigMap — see values-overrides.yaml for the full
+  # set of options and rationale.
+  values:
+    image:
+      # Pin in production. `:latest` is fine for dev; calver tags `vYYYY.MM.D`
+      # are produced on every push to main.
+      tag: latest
+      pullPolicy: Always
+
+    # Verbose during initial bring-up. Drop to INFO once the cluster is stable.
+    kopfLogLevel: INFO
+
+    # Recommended: leave s3.create=false and provide the Secret via
+    # SOPS / Sealed Secrets / External Secrets. The chart's `s3.create=true`
+    # path does work but inlines credentials in the HelmRelease.
+    s3:
+      create: false
+      secretName: s3-driver-storage-secret
+
+    # Bug 6/8: the operator defaults to this name even when the CR omits
+    # authSecretRef. Provide a stub Secret (see secrets.example.yaml) until
+    # the default is removed.
+    registry:
+      create: false
+      secretName: private-registry-secret
+
+    # Flatcar release-feed poller: keeps a ConfigMap of stable/lts versions
+    # current. Disable if the cluster has no internet egress to flatcar.org.
+    flatcar:
+      pollEnabled: true
+      pollSchedule: "@hourly"
+
+    # Optional resource overrides — bump if the operator OOMs on large clusters.
+    resources:
+      limits:
+        cpu: 500m
+        memory: 512Mi
+      requests:
+        cpu: 100m
+        memory: 128Mi

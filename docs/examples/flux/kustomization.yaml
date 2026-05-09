@@ -1,0 +1,14 @@
+# Optional: bundle the static manifests in a Kustomization for Flux to apply
+# in one go. Adjust paths to fit your Flux repo layout.
+#
+# For the chart itself, use the HelmRelease (helmrelease.yaml) — Flux's
+# kustomize-controller will not render Helm charts.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: vgpu-driver-operator
+resources:
+  - namespace.yaml
+  - secrets.example.yaml      # Replace with SOPS/SealedSecrets in production
+  - gitrepository.yaml        # Lives in flux-system namespace; that's fine
+  - helmrelease.yaml
+  - vgpudriverimage.yaml

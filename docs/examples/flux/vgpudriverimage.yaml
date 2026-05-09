@@ -1,0 +1,90 @@
+# Example VGPUDriverImage custom resource for a real Flatcar cluster.
+#
+# Adjust:
+#   - driverVersions: list of NVIDIA vGPU driver versions to build
+#   - source.uriTemplate: where the .run installer lives in S3
+#                         (placeholder syntax MUST be ${DRIVER_VERSION} —
+#                          see Bug 9 in TODO.md)
+#   - registry.repository: where built images go
+#   - flatcar.discoverFromNodes: true on a real Flatcar cluster (NFD-driven)
+#   - precompile: true to also build precompiled images (recommended for
+#                 datacenter GPUs / NVIDIA GPU Operator usePrecompiled mode)
+apiVersion: vgpu.flatcar.io/v1alpha1
+kind: VGPUDriverImage
+metadata:
+  name: vgpu-drivers
+  namespace: vgpu-driver-operator
+spec:
+  driverVersions:
+    - "535.261.03"
+
+  source:
+    type: s3
+    # Note: ${DRIVER_VERSION} is the only operator-expanded placeholder for
+    # uriTemplate at the moment. {flatcarVersion} and {arch} are honored too;
+    # {driverVersion} (curly braces, no dollar) is NOT — see Bug 9.
+    uriTemplate: "s3://vgpu-drivers/NVIDIA-Linux-x86_64-${DRIVER_VERSION}-grid.run"
+    credentialsSecretRef:
+      name: s3-driver-storage-secret
+
+  registry:
+    repository: "registry.example.com/vgpu-driver"
+    cacheRepository: "registry.example.com/vgpu-driver-cache"
+    # Uncomment if your registry requires auth. Otherwise the chart-level
+    # private-registry-secret stub (see secrets.example.yaml) covers the
+    # operator's default-name fallback (Bug 6/8 — see TODO.md).
+    # authSecretRef:
+    #   name: private-registry-secret
+
+  flatcar:
+    # On a real Flatcar cluster with NFD installed, prefer node-driven
+    # discovery: the operator reads system-os_release.{ID,VERSION_ID} labels
+    # and builds for whatever Flatcar versions are running.
+    discoverFromNodes: true
+
+    # Optionally also track release channels — operator polls these and adds
+    # discovered versions to the build set. Useful to pre-build images before
+    # rolling Flatcar upgrades land on nodes.
+    trackChannels:
+      - stable
+
+    # Or pin specific Flatcar versions (additive to discoverFromNodes /
+    # trackChannels). Use this for non-Flatcar test clusters or early
+    # validation of an upcoming release.
+    # versions:
+    #   - "4593.2.0"
+
+    arch: amd64
+
+  # Build BOTH runtime and precompiled image variants. The NVIDIA GPU Operator
+  # consumes the precompiled tag when configured with `usePrecompiled: true`.
+  # Tag formats published:
+  #   runtime    -> 535.261.03-flatcar4593.2.0
+  #   precompile -> 535.261.03-<kernel>-flatcar4593.2.0  (kernel auto-discovered at build)
+  precompile: true
+
+  retention:
+    enabled: true
+    # Keep N previous Flatcar versions per driver version. 0 = only the active
+    # set on the cluster.
+    keepPreviousFlatcarVersions: 2
+    # Don't delete tags younger than this even if they fall outside the keep
+    # window. Protects against churn during rolling upgrades.
+    minAgeBeforeDelete: "168h"
+
+  build:
+    # BuildKit container image used for the privileged build pod. Pin in prod.
+    buildkitImage: "moby/buildkit:rootless"
+
+    resources:
+      limits:
+        cpu: "4"
+        memory: 8Gi
+      requests:
+        cpu: "1"
+        memory: 2Gi
+
+    # Schedule build pods on workers, not control-plane. Avoid GPU nodes if
+    # you'd rather not pull large base images onto them.
+    # nodeSelector:
+    #   node-role.kubernetes.io/worker: "true"

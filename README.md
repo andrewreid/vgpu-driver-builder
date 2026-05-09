@@ -102,7 +102,6 @@ An operator-driven approach to building Flatcar-compatible NVIDIA drivers on-clu
 
 - **[Installation](docs/installation.md)** — Prerequisites, Helm configuration, secrets provisioning, and values reference
 - **[GPU Operator Integration](docs/gpu-operator-integration.md)** — Wiring the NVIDIA GPU Operator to use built images
-- **[Migration from Terraform](docs/migration-from-terraform.md)** — Mapping old Terraform variables to Helm values and CRD fields
 - **[Architecture](docs/architecture.md)** — Design rationale, component diagram, and reconciliation pseudocode
 
 ## License

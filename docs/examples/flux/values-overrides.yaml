@@ -1,0 +1,69 @@
+# Reference values overrides — copy the keys you need into the HelmRelease
+# `spec.values:` block, or reference via `spec.valuesFrom:` for SOPS-encrypted
+# secret values. Defaults live in charts/vgpu-driver-operator/values.yaml.
+
+image:
+  repository: ghcr.io/andrewreid/vgpu-driver-operator
+  # Recommendation: pin in prod (e.g. v2026.05.13). Use latest only on dev.
+  tag: latest
+  pullPolicy: Always
+
+# Image pull secrets for the operator pod itself (NOT for build jobs).
+imagePullSecrets: []
+
+# Pod placement — typical: keep on control-plane or worker, NOT on GPU nodes
+# (the operator does not need GPUs). RKE2 control-plane nodes carry the
+# `node-role.kubernetes.io/control-plane` taint by default; tolerate or run on
+# workers.
+nodeSelector: {}
+tolerations: []
+affinity:
+  # Avoid scheduling on GPU nodes if you label them; leaves GPU capacity for
+  # workloads.
+  nodeAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 1
+        preference:
+          matchExpressions:
+            - key: nvidia.com/gpu.present
+              operator: NotIn
+              values: ["true"]
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+# Flatcar release-feed poller. Writes discovered stable/lts versions to a
+# ConfigMap consumed by the operator. Safe to leave enabled; cheap.
+flatcar:
+  pollEnabled: true
+  pollSchedule: "@hourly"
+
+# Recommended: provide the S3 Secret out-of-band (SOPS / Sealed Secrets /
+# External Secrets) and leave create=false. Required keys: S3_ENDPOINT_URL /
+# AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY. See secrets.example.yaml.
+s3:
+  create: false
+  secretName: s3-driver-storage-secret
+
+# `registry.create=true` works but is rarely useful — the chart only supports
+# inline username/password, which is the wrong shape for most production setups
+# (use ExternalSecrets / SOPS / IRSA / etc.). Leave create=false and supply the
+# Secret yourself.
+registry:
+  create: false
+  secretName: private-registry-secret
+
+# Operator log verbosity. DEBUG produces useful kopf event traces during
+# initial bring-up.
+kopfLogLevel: INFO
+
+# Build asset ConfigMap is rendered automatically from
+# charts/vgpu-driver-operator/files/build/. Do not override unless you fork the
+# build scripts.
+buildAssets:
+  configMapName: driver-build-files
