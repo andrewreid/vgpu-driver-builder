@@ -127,7 +127,7 @@ def build_job_manifest(
 
     # S3 URI from template.
     uri_template: str = source.get("uriTemplate", "")
-    driver_s3_uri = uri_template.replace("${DRIVER_VERSION}", key.driver)
+    driver_s3_uri = uri_template.replace("${DRIVER_VERSION}", key.driver).replace("{driverVersion}", key.driver)
 
     # Build the init container command.
     init_command = (

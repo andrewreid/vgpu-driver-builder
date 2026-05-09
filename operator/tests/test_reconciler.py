@@ -219,6 +219,36 @@ class TestTagRoundTrips:
         assert parse_precompile_tag("notavalidtag") is None
         assert parse_precompile_tag("") is None
 
+    def test_precompile_driver_with_rc_suffix(self):
+        """Driver version with rc suffix like 535.104-rc1 must parse correctly."""
+        tag = "535.104-rc1-6.12.81-flatcar4593.2.0"
+        recovered = parse_precompile_tag(tag)
+        assert recovered is not None
+        assert recovered.driver == "535.104-rc1"
+        assert recovered.flatcar == "4593.2.0"
+        assert recovered.precompile is True
+
+    def test_extract_kernel_with_rc_driver(self):
+        """Extract kernel from tag with rc-suffixed driver."""
+        tag = "535.104-rc1-6.12.81-flatcar4593.2.0"
+        assert extract_kernel_from_precompile_tag(tag) == "6.12.81"
+
+    def test_precompile_rejects_runtime_tag_with_rc_driver(self):
+        """Runtime-style tag for an rc driver must NOT parse as precompile.
+
+        Regression: previous regex `^(driver)-(.+)$` allowed kernel="rc1"
+        for tag "535.104-rc1-flatcar4593.2.0", causing false positives in
+        compute_missing when same repo holds runtime + precompile tags.
+        """
+        assert parse_precompile_tag("535.104-rc1-flatcar4593.2.0") is None
+        assert extract_kernel_from_precompile_tag("535.104-rc1-flatcar4593.2.0") is None
+
+    def test_matches_precompile_tag_with_rc_driver(self):
+        """matches_precompile_tag should work with rc-suffixed drivers."""
+        tag = "535.104-rc1-6.12.81-flatcar4593.2.0"
+        key = BuildKey(driver="535.104-rc1", flatcar="4593.2.0", precompile=True)
+        assert matches_precompile_tag(key, tag)
+
     def test_matches_precompile_tag_wrong_driver(self):
         key = BuildKey(driver="550.54.15", flatcar="4230.2.3", precompile=True)
         tag = "535.183.01-6.1.119-flatcar4230.2.3"

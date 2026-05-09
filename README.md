@@ -1,6 +1,7 @@
 # NVIDIA vGPU Driver Operator for Flatcar Linux
 
 In-cluster Kubernetes operator that builds and pushes NVIDIA vGPU driver images compatible with Flatcar Linux.
+Largely AI-generated slop to automate some bits in my homelab.
 
 ## What it does
 

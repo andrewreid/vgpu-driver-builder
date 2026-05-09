@@ -1,0 +1,35 @@
+# Flux OCIRepository pointing at the operator's Helm chart published to GHCR.
+# The chart is published on every push to main using calver: YYYY.M.<run>
+# (no leading zero on month, no `v` prefix, to satisfy semver constraints).
+#
+# Pin `ref.tag` to a specific release in production. If you prefer to track
+# the latest stable release automatically, replace the `ref.tag` block with:
+#
+#   ref:
+#     semver: ">=2026.0.0"
+#
+# Note: this manifest uses the GA `source.toolkit.fluxcd.io/v1` API
+# (Flux v2.0+). Older Flux v0.x clusters used `v1beta2`.
+#
+# GHCR auth: ghcr.io packages may be private. If the chart package is
+# private (or you hit 401 errors during reconciliation), uncomment the
+# `secretRef` stanza below and create a dockerconfigjson secret named
+# `ghcr-pull-secret` in the flux-system namespace:
+#
+#   kubectl -n flux-system create secret docker-registry ghcr-pull-secret \
+#     --docker-server=ghcr.io \
+#     --docker-username=<github-username> \
+#     --docker-password=<github-token-with-read:packages>
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: OCIRepository
+metadata:
+  name: vgpu-driver-operator
+  namespace: flux-system
+spec:
+  interval: 10m
+  url: oci://ghcr.io/andrewreid/charts/vgpu-driver-operator
+  # secretRef:
+  #   name: ghcr-pull-secret
+  ref:
+    # Pin to a specific calver release. Replace with the version you want to deploy.
+    tag: "2026.5.1"

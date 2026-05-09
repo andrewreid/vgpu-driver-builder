@@ -1,0 +1,13 @@
+1. Get the operator service account:
+  kubectl get serviceaccount -n {{ .Release.Namespace }} {{ include "vgpu-driver-operator.serviceAccountName" . }}
+
+2. The vGPU driver operator is designed as a single-replica Deployment.
+   DO NOT scale it horizontally. Multi-replica mode is unsupported and will cause
+   dual reconcile loops to race on Job creation and CR status patching, leading to
+   inconsistent state.
+
+3. Avoid using kubectl set image or kubectl patch on the operator Deployment directly.
+   These commands create field manager conflicts with Helm's server-side apply.
+   If a conflict occurs:
+   - Use: helm upgrade --server-side=false <release-name> <chart>
+   - Or manually strip stale managedFields entries from the Deployment spec.

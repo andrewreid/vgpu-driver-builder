@@ -9,6 +9,6 @@ namespace: vgpu-driver-operator
 resources:
   - namespace.yaml
   - secrets.example.yaml      # Replace with SOPS/SealedSecrets in production
-  - gitrepository.yaml        # Lives in flux-system namespace; that's fine
+  - ocirepository.yaml        # Lives in flux-system namespace; that's fine
   - helmrelease.yaml
   - vgpudriverimage.yaml

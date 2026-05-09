@@ -17,9 +17,9 @@ spec:
     cleanupOnFail: true
   chart:
     spec:
-      chart: ./charts/vgpu-driver-operator
+      chart: vgpu-driver-operator
       sourceRef:
-        kind: GitRepository
+        kind: OCIRepository
         name: vgpu-driver-operator
         namespace: flux-system
       reconcileStrategy: ChartVersion

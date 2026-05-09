@@ -18,7 +18,38 @@ The operator works on any Kubernetes cluster but is designed for clusters runnin
 
 ## Helm installation
 
-### Basic installation (development)
+### OCI chart install (production)
+
+The chart is published as an OCI Helm artifact on every push to `main`, versioned
+with calver (`YYYY.M.<run>`, no leading zero on month, no `v` prefix):
+
+```bash
+helm install vgpu-driver-operator oci://ghcr.io/andrewreid/charts/vgpu-driver-operator \
+  --version 2026.5.1 \
+  -n vgpu-driver-operator \
+  --create-namespace
+```
+
+Replace `2026.5.1` with the version you want to deploy. `helm show chart`
+on an OCI URL only returns the latest chart's metadata, not a list of all
+versions. To list available versions, query the GHCR registry directly:
+
+```bash
+# With crane (preferred):
+crane ls ghcr.io/andrewreid/charts/vgpu-driver-operator
+
+# Or via the GitHub Packages API (requires a token with read:packages):
+gh api -H "Accept: application/vnd.github+json" \
+  /users/andrewreid/packages/container/charts%2Fvgpu-driver-operator/versions
+```
+
+If the GHCR package is private, authenticate first with
+`helm registry login ghcr.io` (use a GitHub token with `read:packages`).
+
+### Local chart install (development)
+
+For local iteration or testing unreleased changes, install directly from the
+cloned repository:
 
 ```bash
 helm install vgpu-driver-operator charts/vgpu-driver-operator \
@@ -432,3 +463,45 @@ If a build takes much longer, check:
 - BuildKit pod logs: `kubectl logs -n vgpu-driver-operator <pod-name>`
 - Network connectivity: can the pod reach S3 and the registry?
 - Registry quota: is the registry full?
+
+## Operations / Troubleshooting
+
+### Helm field-manager conflicts on operator Deployment
+
+**Symptom**: `helm upgrade` fails with a server-side-apply error on `spec.template.spec.containers[*].imagePullPolicy` or other Deployment fields:
+
+```
+Error: UPGRADE FAILED: error applying patches: error when patch core/v1/Deployment ... applying patch <manifest>; server-side apply conflict: the field is still owned by a different manager
+```
+
+**Root cause**: The operator Deployment was previously modified using imperative commands like `kubectl set image`, `kubectl patch`, or similar. These commands register a different field-manager owner. Subsequent `helm upgrade --server-side` rejects the conflict.
+
+**Recommendation**: Do NOT use imperative mutation tools on the operator Deployment. Use `helm upgrade` exclusively. The chart's post-install NOTES always carry this warning.
+
+In all of the workarounds below, substitute the chart reference appropriate
+for your install method — either the OCI URL `oci://ghcr.io/andrewreid/charts/vgpu-driver-operator --version <ver>` or a local path like `charts/vgpu-driver-operator`.
+
+**Workarounds** (when a conflict already exists):
+
+1. **Fall back to client-side merge** (simplest):
+   ```bash
+   helm upgrade --server-side=false vgpu-driver-operator <chart-ref> \
+     -n vgpu-driver-operator
+   ```
+
+2. **Strip stale managedFields** (resolves root cause). The Kubernetes
+   API rejects a JSON-Patch `remove` on `/metadata/managedFields`, so use a
+   read-modify-write replace instead:
+   ```bash
+   kubectl -n vgpu-driver-operator get deploy vgpu-driver-operator -o json \
+     | jq 'del(.metadata.managedFields)' \
+     | kubectl replace -f -
+   ```
+   Then re-run `helm upgrade`.
+
+3. **Force conflict override** (last resort):
+   ```bash
+   helm upgrade --force-conflicts vgpu-driver-operator <chart-ref> \
+     -n vgpu-driver-operator
+   ```
+   This overwrites out-of-band changes—only use if you are certain no custom configuration exists.

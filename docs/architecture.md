@@ -176,6 +176,12 @@ When `retention.enabled: true`:
 
 A single `VGPUDriverImage` can run both: runtime builds are always created; precompiled is opt-in with `precompile: true`. GPU Operator can switch between them by changing `driver.usePrecompiled` and `driver.repository` / `driver.repositoryPrecompiled`.
 
+## Flatcar sources base image
+
+Precompiled builds use `ghcr.io/andrewreid/flatcar-developer:<flatcar_version>-sources` as the base image, published and maintained by the repository author in a separate repository. Each base image contains Flatcar kernel sources, headers, and build tools required to compile NVIDIA kernel modules during the build.
+
+New `<flatcar_version>-sources` tags are automatically published via GitHub Actions within a few hours of upstream Flatcar releases. Operators do not need to take manual action to consume new releases—the images are typically available shortly after the corresponding Flatcar version becomes available. If a precompile build fails with an image pull error for a newly released Flatcar version, wait briefly and retry the build, or consult the upstream sources repository.
+
 ## Registry authentication
 
 Credentials are mounted from Kubernetes Secrets:

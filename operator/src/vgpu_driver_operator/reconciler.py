@@ -120,13 +120,13 @@ def parse_precompile_tag(tag: str) -> BuildKey | None:
         return None
     flatcar = tag[idx + len(sep):]
     remainder = tag[:idx]  # "<driver>-<kernel>"
-    # Split remainder into driver and kernel: split on the FIRST "-" that is
-    # preceded by a digit and followed by a digit (version boundary).
-    m = re.search(r"(\d)-(\d)", remainder)
+    # Split remainder into driver and kernel using a driver version pattern.
+    # Driver format: \d+\.\d+(\.\d+)?(-[A-Za-z0-9.]+)?
+    # Match this from the start, then everything after its trailing "-" is kernel.
+    m = re.match(r"^(\d+\.\d+(?:\.\d+)?(?:-[A-Za-z0-9.]+)?)-(\d+\.\d+.+)$", remainder)
     if not m:
         return None
-    split_pos = m.start() + 1  # position of the "-"
-    driver = remainder[:split_pos]
+    driver = m.group(1)
     if not driver or not flatcar:
         return None
     return BuildKey(driver=driver, flatcar=flatcar, precompile=True)
@@ -142,11 +142,10 @@ def extract_kernel_from_precompile_tag(tag: str) -> str | None:
     if idx < 1:
         return None
     remainder = tag[:idx]  # "<driver>-<kernel>"
-    m = re.search(r"(\d)-(\d)", remainder)
+    m = re.match(r"^(\d+\.\d+(?:\.\d+)?(?:-[A-Za-z0-9.]+)?)-(\d+\.\d+.+)$", remainder)
     if not m:
         return None
-    split_pos = m.start() + 1
-    kernel = remainder[split_pos + 1:]
+    kernel = m.group(2)
     return kernel or None
 
 

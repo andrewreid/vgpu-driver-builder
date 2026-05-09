@@ -287,6 +287,35 @@ def _get_volume_mounts(manifest: dict) -> list[dict]:
 
 
 class TestRegistrySecretVolume:
+    def test_no_registry_secret_when_anonymous(self):
+        """Bug 6/8: anonymous-registry CR (no authSecretRef, no env var) must
+        produce no registry-secret volume or volumeMount."""
+        kwargs = {**_COMMON_KWARGS, "registry_secret_name": None}
+        manifest = build_job_manifest(
+            spec=_SPEC,
+            key=_RUNTIME_KEY,
+            **kwargs,
+        )
+        volume_names = [v["name"] for v in _get_volumes(manifest)]
+        assert "docker-config" not in volume_names
+        mount_names = [m["name"] for m in _get_volume_mounts(manifest)]
+        assert "docker-config" not in mount_names
+
+    def test_registry_secret_mounted_when_provided(self):
+        """Bug 6/8: when registry_secret_name is set, volume + mount must appear."""
+        kwargs = {**_COMMON_KWARGS, "registry_secret_name": "my-secret"}
+        manifest = build_job_manifest(
+            spec=_SPEC,
+            key=_RUNTIME_KEY,
+            **kwargs,
+        )
+        volume_names = [v["name"] for v in _get_volumes(manifest)]
+        assert "docker-config" in volume_names
+        secret_vol = next(v for v in _get_volumes(manifest) if v["name"] == "docker-config")
+        assert secret_vol["secret"]["secretName"] == "my-secret"
+        mount_names = [m["name"] for m in _get_volume_mounts(manifest)]
+        assert "docker-config" in mount_names
+
     def test_volume_present_when_secret_provided(self):
         manifest = build_job_manifest(
             spec=_SPEC,
@@ -446,3 +475,64 @@ class TestManifestStructure:
         container = manifest["spec"]["template"]["spec"]["containers"][0]
         assert "resources" in container
         assert container["resources"]["requests"]["cpu"] == "2"
+
+
+# ---------------------------------------------------------------------------
+# URI template placeholder tests
+# ---------------------------------------------------------------------------
+
+
+class TestURITemplatePlaceholders:
+    def test_dollar_brace_placeholder(self):
+        """Test ${DRIVER_VERSION} placeholder substitution."""
+        spec = {
+            **_SPEC,
+            "source": {
+                "type": "s3",
+                "uriTemplate": "s3://bucket/drivers/NVIDIA-Linux-x86_64-${DRIVER_VERSION}.run",
+            },
+        }
+        manifest = build_job_manifest(
+            spec=spec,
+            key=_RUNTIME_KEY,
+            **_COMMON_KWARGS,
+        )
+        init_env = manifest["spec"]["template"]["spec"]["initContainers"][0]["env"]
+        s3_uri_env = next(e for e in init_env if e["name"] == "VGPU_DRIVER_S3_URI")
+        assert s3_uri_env["value"] == "s3://bucket/drivers/NVIDIA-Linux-x86_64-550.54.15.run"
+
+    def test_format_style_placeholder(self):
+        """Test {driverVersion} placeholder substitution (Python str.format style)."""
+        spec = {
+            **_SPEC,
+            "source": {
+                "type": "s3",
+                "uriTemplate": "s3://bucket/drivers/NVIDIA-Linux-x86_64-{driverVersion}.run",
+            },
+        }
+        manifest = build_job_manifest(
+            spec=spec,
+            key=_RUNTIME_KEY,
+            **_COMMON_KWARGS,
+        )
+        init_env = manifest["spec"]["template"]["spec"]["initContainers"][0]["env"]
+        s3_uri_env = next(e for e in init_env if e["name"] == "VGPU_DRIVER_S3_URI")
+        assert s3_uri_env["value"] == "s3://bucket/drivers/NVIDIA-Linux-x86_64-550.54.15.run"
+
+    def test_both_placeholders_in_template(self):
+        """Test that both ${DRIVER_VERSION} and {driverVersion} can appear together."""
+        spec = {
+            **_SPEC,
+            "source": {
+                "type": "s3",
+                "uriTemplate": "s3://bucket/${DRIVER_VERSION}/{driverVersion}/driver.run",
+            },
+        }
+        manifest = build_job_manifest(
+            spec=spec,
+            key=_RUNTIME_KEY,
+            **_COMMON_KWARGS,
+        )
+        init_env = manifest["spec"]["template"]["spec"]["initContainers"][0]["env"]
+        s3_uri_env = next(e for e in init_env if e["name"] == "VGPU_DRIVER_S3_URI")
+        assert s3_uri_env["value"] == "s3://bucket/550.54.15/550.54.15/driver.run"

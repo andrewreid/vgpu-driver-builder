@@ -8,15 +8,70 @@ a Flatcar Linux + RKE2 cluster. Adapt to your environment before applying.
 | File | Purpose |
 |---|---|
 | `namespace.yaml` | Creates the `vgpu-driver-operator` namespace |
-| `gitrepository.yaml` | Flux `GitRepository` pointing at this repo (chart lives at `charts/vgpu-driver-operator`) |
+| `ocirepository.yaml` | Flux `OCIRepository` pulling the chart from `ghcr.io/andrewreid/charts/vgpu-driver-operator` |
 | `helmrelease.yaml` | Flux `HelmRelease` that installs the chart with sensible defaults |
 | `values-overrides.yaml` | Example value overrides documented inline (paste into the HelmRelease `values:` block, or reference via `valuesFrom`) |
 | `secrets.example.yaml` | Placeholder for the two Secrets the operator consumes — **do not commit real credentials**; encrypt with SOPS / Sealed Secrets / External Secrets |
 | `vgpudriverimage.yaml` | Example `VGPUDriverImage` custom resource that triggers a build |
 
+## Chart source
+
+The chart is published as an OCI Helm artifact on every push to `main`:
+
+```
+oci://ghcr.io/andrewreid/charts/vgpu-driver-operator
+```
+
+Versions follow calver: `YYYY.M.<run>` (no leading zero on month, no `v` prefix,
+to satisfy Helm semver constraints). Examples: `2026.5.1`, `2026.12.3`.
+
+`ocirepository.yaml` pins `ref.tag` to a specific version. To instead track the
+latest stable release, replace the `ref` block with:
+
+```yaml
+ref:
+  semver: ">=2026.0.0"
+```
+
+### Using a local chart path instead (dev mode)
+
+If you are iterating locally or testing unreleased changes, you can swap the
+`OCIRepository` for a `GitRepository` and point the `HelmRelease` at the chart
+path in the repo:
+
+```yaml
+# gitrepository.yaml (local dev only)
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: GitRepository
+metadata:
+  name: vgpu-driver-operator
+  namespace: flux-system
+spec:
+  interval: 1m
+  url: https://github.com/andrewreid/vgpu-driver-builder
+  ref:
+    branch: main
+  ignore: |
+    /*
+    !/charts/vgpu-driver-operator/**
+```
+
+Then in `helmrelease.yaml` change `chart.spec` to:
+
+```yaml
+chart:
+  spec:
+    chart: ./charts/vgpu-driver-operator
+    sourceRef:
+      kind: GitRepository
+      name: vgpu-driver-operator
+      namespace: flux-system
+```
+
 ## Prerequisites
 
-1. **Flux v2** installed and reconciling against the cluster.
+1. **Flux v2** (v0.32.0+, source-controller v0.26.0+) installed and reconciling
+   against the cluster. `OCIRepository` requires these minimum versions.
 2. **Node Feature Discovery (NFD)** running. The operator reads
    `feature.node.kubernetes.io/system-os_release.{ID,VERSION_ID}` labels to
    discover Flatcar versions on nodes. NFD ships with the NVIDIA GPU Operator,
@@ -52,13 +107,14 @@ this deployment manifest set:
 ```
 1. Apply namespace.yaml
 2. Apply secrets.example.yaml (replace placeholders with real creds via SOPS/SealedSecrets/ExternalSecrets)
-3. Apply gitrepository.yaml + helmrelease.yaml — Flux installs operator + CRD
+3. Apply ocirepository.yaml + helmrelease.yaml — Flux installs operator + CRD
 4. Apply vgpudriverimage.yaml — operator picks it up and dispatches a build Job
 ```
 
 ## Verifying
 
 ```bash
+kubectl -n flux-system get ocirepository vgpu-driver-operator
 kubectl -n vgpu-driver-operator get pods,vgpudriverimage,jobs
 kubectl -n vgpu-driver-operator logs deploy/vgpu-driver-operator
 kubectl -n vgpu-driver-operator get vgpudriverimage <name> -o yaml | yq .status

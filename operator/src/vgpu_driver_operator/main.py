@@ -103,7 +103,10 @@ def on_node_event(event: dict, logger: logging.Logger, **_: Any) -> None:
         if _node_event_times.get(node_name) != now:
             # A newer event arrived — let that one do the work.
             return
-        _touch_all_vgpu_driver_images(logger)
+        try:
+            _touch_all_vgpu_driver_images(logger)
+        except Exception as exc:
+            log.exception("on_node_event: _touch_all_vgpu_driver_images raised: %s", exc)
 
     t = threading.Thread(target=_debounced, daemon=True)
     t.start()
@@ -220,18 +223,62 @@ def on_job_event(event: dict, logger: logging.Logger, **_: Any) -> None:
                 break
 
         if not updated:
+            mode_label = labels.get("vgpu.flatcar.io/mode", "")
             builds.append(
                 {
                     "driverVersion": driver_ver,
                     "flatcarVersion": flatcar_ver,
+                    "mode": mode_label,
                     "phase": phase,
                     "jobName": job_name,
                     "lastTransitionTime": now_str,
                 }
             )
 
+        # For precompile builds that just became Ready, resolve the real tag.
+        mode_label = labels.get("vgpu.flatcar.io/mode", "")
+        if phase == "Ready" and mode_label == "precompiled":
+            crd_spec: dict = crd_obj.get("spec") or {}
+            registry_cfg: dict = crd_spec.get("registry") or {}
+            repo_precompile: str = registry_cfg.get("repositoryPrecompiled", "")
+            if repo_precompile:
+                prefix = f"{driver_ver}-"
+                suffix = f"-flatcar{flatcar_ver}"
+                try:
+                    matched = _registry.find_matching_tags(repo_precompile, None, prefix, suffix)
+                    if matched:
+                        real_tag = next(iter(matched))
+                        for entry in builds:
+                            if (
+                                entry.get("driverVersion") == driver_ver
+                                and entry.get("flatcarVersion") == flatcar_ver
+                            ):
+                                entry["tag"] = real_tag
+                                break
+                except Exception as exc:
+                    logger.warning(
+                        "on_job_event: could not resolve precompile tag for %s/%s: %s",
+                        driver_ver, flatcar_ver, exc,
+                    )
+
+        # Re-evaluate Reconciled condition.
+        all_ready = all(b.get("phase") == "Ready" for b in builds) if builds else True
+        now_str2 = datetime.now(tz=timezone.utc).isoformat()
+        pending_count = sum(1 for b in builds if b.get("phase") != "Ready")
+        condition = {
+            "type": "Reconciled",
+            "status": "True" if all_ready else "False",
+            "reason": "AllBuildsReady" if all_ready else "BuildsPending",
+            "message": (
+                f"{len(builds)} build(s) ready"
+                if all_ready
+                else f"{pending_count} build(s) pending"
+            ),
+            "lastTransitionTime": now_str2,
+        }
+
         try:
-            _crd.patch_status(custom_api, crd_name, {"builds": builds})
+            _crd.patch_status(custom_api, crd_name, {"builds": builds, "conditions": [condition]})
         except Exception as exc:
             logger.warning(
                 "on_job_event: failed to patch status for %s: %s", crd_name, exc
@@ -425,9 +472,7 @@ def _do_reconcile(
     s3_secret_name: str = (
         (spec.get("source") or {}).get("credentialsSecretRef") or {}
     ).get("name") or os.environ.get("S3_SECRET_NAME", "s3-driver-storage-secret")
-    reg_secret_name: str | None = auth_secret_name or os.environ.get(
-        "REGISTRY_SECRET_NAME", "private-registry-secret"
-    ) or None
+    reg_secret_name: str | None = auth_secret_name or os.environ.get("REGISTRY_SECRET_NAME") or None
     dockerfile_cm = os.environ.get("DOCKERFILE_CONFIGMAP", "driver-build-files")
     buildfiles_cm = os.environ.get("BUILDFILES_CONFIGMAP", "driver-build-files")
     crd_name = name
