@@ -49,3 +49,87 @@ def test_reconcile_registry_unreachable_sets_condition(monkeypatch):
     assert condition["reason"] == "RegistryUnreachable"
     assert "registry.example.com/vgpu/drivers" in condition["message"]
     assert "builds" not in patch.status
+
+
+def test_reconcile_happy_path_emits_info_logs(monkeypatch):
+    logger = MagicMock()
+    patch = SimpleNamespace(status={})
+
+    monkeypatch.setattr(_main, "_load_k8s_config", lambda: None)
+    monkeypatch.setattr(_main._crd, "operator_namespace", lambda: "vgpu-driver-operator")
+    monkeypatch.setattr(_main.client, "CoreV1Api", lambda: MagicMock())
+    monkeypatch.setattr(_main.client, "BatchV1Api", lambda: MagicMock())
+    monkeypatch.setattr(_main.client, "CustomObjectsApi", lambda: MagicMock())
+    monkeypatch.setattr(_main._crd, "list_owned_jobs", MagicMock(return_value=[]))
+    monkeypatch.setattr(
+        _main._registry,
+        "list_tags",
+        MagicMock(return_value={"550.54.15-flatcar4593.2.0"}),
+    )
+    monkeypatch.setattr(_main.kopf, "event", MagicMock())
+
+    _main._do_reconcile(
+        spec=_base_spec(),
+        name="my-vdi",
+        status={},
+        patch=patch,  # type: ignore[arg-type]
+        body={"metadata": {"uid": "uid-1", "generation": 3}},  # type: ignore[arg-type]
+        logger=logger,
+    )
+
+    info_messages = [call.args[0] % call.args[1:] for call in logger.info.call_args_list]
+    assert "reconcile: starting my-vdi generation=3" in info_messages
+    assert any("discovered 0 flatcar version(s): []" in msg for msg in info_messages)
+    assert any(
+        "tag 550.54.15-flatcar4593.2.0 already in registry, skipping" in msg
+        for msg in info_messages
+    )
+    assert any("patched status for my-vdi" in msg for msg in info_messages)
+    assert "reconcile complete: 1 ready, 0 building, 0 pending, 0 failed" in info_messages
+
+
+def test_on_job_event_logs_terminal_transition(monkeypatch):
+    logger = MagicMock()
+    custom_api = MagicMock()
+    crd_obj = {
+        "metadata": {"name": "my-vdi", "uid": "owner-1"},
+        "status": {
+            "builds": [
+                {
+                    "driverVersion": "550.54.15",
+                    "flatcarVersion": "4593.2.0",
+                    "mode": "compiled",
+                    "phase": "Building",
+                }
+            ]
+        },
+    }
+    event = {
+        "object": {
+            "metadata": {
+                "name": "vgpu-build-abc",
+                "labels": {
+                    "vgpu.flatcar.io/owner-uid": "owner-1",
+                    "vgpu.flatcar.io/driver-version": "550.54.15",
+                    "vgpu.flatcar.io/flatcar-version": "4593.2.0",
+                    "vgpu.flatcar.io/mode": "compiled",
+                },
+            },
+            "status": {"succeeded": 1},
+        }
+    }
+
+    monkeypatch.setattr(_main, "_load_k8s_config", lambda: None)
+    monkeypatch.setattr(_main.client, "CustomObjectsApi", lambda: custom_api)
+    monkeypatch.setattr(_main._crd, "list_vgpu_driver_images", MagicMock(return_value=[crd_obj]))
+    monkeypatch.setattr(_main._crd, "patch_status", MagicMock())
+
+    _main.on_job_event(event, logger)
+
+    logger.info.assert_any_call(
+        "job %s transitioned to %s (driver=%s flatcar=%s)",
+        "vgpu-build-abc",
+        "Ready",
+        "550.54.15",
+        "4593.2.0",
+    )
