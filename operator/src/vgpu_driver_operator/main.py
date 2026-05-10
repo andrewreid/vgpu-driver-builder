@@ -425,6 +425,24 @@ def _do_reconcile(
     if active_repo:
         try:
             existing_tags = _registry.list_tags(active_repo, reg_auth)
+        except _registry.RegistryUnreachable as exc:
+            message = f"Registry unreachable: {exc}"
+            logger.warning("reconcile: %s", message)
+            patch.status.update(
+                {
+                    "observedNodes": observed_nodes,
+                    "conditions": [
+                        {
+                            "type": "Reconciled",
+                            "status": "False",
+                            "reason": "RegistryUnreachable",
+                            "message": message,
+                            "lastTransitionTime": now_str,
+                        }
+                    ],
+                }
+            )
+            return
         except _registry.RegistryError as exc:
             logger.warning("reconcile: failed to list tags from %s: %s", active_repo, exc)
 

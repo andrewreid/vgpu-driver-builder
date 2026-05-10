@@ -21,6 +21,8 @@ from urllib.parse import urlparse
 
 import requests
 
+REGISTRY_TIMEOUT = (5, 10)
+
 # ---------------------------------------------------------------------------
 # Public types
 # ---------------------------------------------------------------------------
@@ -44,8 +46,22 @@ class RegistryError(Exception):
     """Base error for all registry operations."""
 
 
+class RegistryUnreachable(RegistryError):
+    """Raised when the registry cannot be reached due to a network failure.
+
+    Covers DNS resolution failures, TCP connection refused, and read/connect
+    timeouts.  Callers that catch ``RegistryError`` continue to work — this
+    subclass exists so reconcile can distinguish a transient network outage
+    (back off, set a status condition) from a permanent API error.
+    """
+
+
 class TagDeletionDisabled(RegistryError):
     """Raised when the registry returns HTTP 405 for DELETE /manifests/<digest>."""
+
+
+def _network_error(url: str, exc: requests.RequestException) -> RegistryUnreachable:
+    return RegistryUnreachable(f"{url}: {exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -127,6 +143,7 @@ class _RegistrySession:
     def _request(self, method: str, url: str, **kwargs: object) -> requests.Response:
         """Issue *method* request, handling bearer-token acquisition on 401."""
         auth = self._auth or {}
+        kwargs.setdefault("timeout", REGISTRY_TIMEOUT)
 
         # If a raw bearer is provided, inject it up front and skip the dance.
         if "bearer" in auth:
@@ -135,6 +152,8 @@ class _RegistrySession:
             kwargs["headers"] = headers  # type: ignore[assignment]
             try:
                 resp = self._session.request(method, url, **kwargs)  # type: ignore[arg-type]
+            except (requests.Timeout, requests.ConnectionError) as exc:
+                raise _network_error(url, exc) from exc
             except requests.RequestException as exc:
                 raise RegistryError(str(exc)) from exc
             return resp
@@ -142,6 +161,8 @@ class _RegistrySession:
         # --- Unauthenticated first attempt ---
         try:
             resp = self._session.request(method, url, **kwargs)  # type: ignore[arg-type]
+        except (requests.Timeout, requests.ConnectionError) as exc:
+            raise _network_error(url, exc) from exc
         except requests.RequestException as exc:
             raise RegistryError(str(exc)) from exc
 
@@ -170,6 +191,8 @@ class _RegistrySession:
         kwargs["headers"] = headers  # type: ignore[assignment]
         try:
             resp2 = self._session.request(method, url, **kwargs)  # type: ignore[arg-type]
+        except (requests.Timeout, requests.ConnectionError) as exc:
+            raise _network_error(url, exc) from exc
         except requests.RequestException as exc:
             raise RegistryError(str(exc)) from exc
 
@@ -196,7 +219,14 @@ class _RegistrySession:
         password = auth.get("password", "")
 
         try:
-            resp = requests.get(realm, params=params, auth=(username, password))
+            resp = requests.get(
+                realm,
+                params=params,
+                auth=(username, password),
+                timeout=REGISTRY_TIMEOUT,
+            )
+        except (requests.Timeout, requests.ConnectionError) as exc:
+            raise _network_error(realm, exc) from exc
         except requests.RequestException as exc:
             raise RegistryError(f"token fetch failed: {exc}") from exc
 
