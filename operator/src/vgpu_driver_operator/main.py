@@ -627,7 +627,35 @@ def _do_reconcile(
                 logger=logger,
                 emit_event=_emit,
             )
+            registry_unreachable = gc_result.pop("_registryUnreachable", "")
             new_status.update(gc_result)
+            if registry_unreachable:
+                message = (
+                    "Registry unreachable during garbage collection: "
+                    f"{registry_unreachable}"
+                )
+                logger.warning("reconcile: %s", message)
+                new_status["conditions"] = [
+                    {
+                        "type": "Reconciled",
+                        "status": "False",
+                        "reason": "RegistryUnreachable",
+                        "message": message,
+                        "lastTransitionTime": now_str,
+                    }
+                ]
+        except _registry.RegistryUnreachable as exc:
+            message = f"Registry unreachable during garbage collection: {exc}"
+            logger.warning("reconcile: %s", message)
+            new_status["conditions"] = [
+                {
+                    "type": "Reconciled",
+                    "status": "False",
+                    "reason": "RegistryUnreachable",
+                    "message": message,
+                    "lastTransitionTime": now_str,
+                }
+            ]
         except Exception as exc:
             logger.warning("reconcile: GC failed: %s", exc)
 
@@ -637,7 +665,7 @@ def _do_reconcile(
         "reconcile: patched status for %s (%d build(s), condition=%s)",
         name,
         len(builds),
-        condition["reason"],
+        new_status["conditions"][0]["reason"],
     )
 
     # --- 11. Emit summary event ---
@@ -652,6 +680,7 @@ def _do_reconcile(
         pending_count,
         failed_count,
     )
+    final_condition = new_status["conditions"][0]
     summary = (
         f"Reconciled: {len(builds)} build(s), "
         f"{ready_count} ready, "
@@ -659,7 +688,15 @@ def _do_reconcile(
     )
     logger.info("reconcile: %s", summary)
     try:
-        kopf.event(body, type="Normal", reason="Reconciled", message=summary)
+        if final_condition["reason"] == "RegistryUnreachable":
+            kopf.event(
+                body,
+                type="Warning",
+                reason=final_condition["reason"],
+                message=final_condition["message"],
+            )
+        else:
+            kopf.event(body, type="Normal", reason="Reconciled", message=summary)
     except Exception:
         pass
 

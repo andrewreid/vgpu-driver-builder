@@ -304,7 +304,7 @@ class TestTagCreatedAt:
         assert result is None
 
     @rsps_lib.activate
-    def test_manifest_timeout_returns_none(self):
+    def test_manifest_timeout_raises_registry_unreachable(self):
         rsps_lib.add(
             rsps_lib.GET,
             f"https://{HOST}/v2/{PATH}/manifests/v1",
@@ -312,7 +312,8 @@ class TestTagCreatedAt:
             match=[matchers.request_kwargs_matcher({"timeout": REGISTRY_TIMEOUT})],
         )
 
-        assert tag_created_at(REPO, "v1", None) is None
+        with pytest.raises(RegistryUnreachable, match=HOST):
+            tag_created_at(REPO, "v1", None)
 
     @rsps_lib.activate
     def test_oci_index_picks_first_child(self):

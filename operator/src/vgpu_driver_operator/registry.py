@@ -419,12 +419,12 @@ def tag_created_at(
     *,
     session: requests.Session | None = None,
 ) -> datetime | None:
-    """Return the ``created`` timestamp for *tag*, or *None* on any error.
+    """Return the ``created`` timestamp for *tag*, or *None* on content errors.
 
     Fetches the manifest, follows a manifest-list/OCI-index to the first
     child manifest, then fetches the config blob and parses its ``created``
     field (RFC3339).  Returns *None* on manifest 404, missing field, or any
-    parse error.
+    parse error. Raises :class:`RegistryUnreachable` for network failures.
     """
     host, path = _split_repository(repository)
     reg = _RegistrySession(auth, session)
@@ -432,6 +432,8 @@ def tag_created_at(
     manifest_url = _manifests_url(host, path, tag)
     try:
         resp = reg.get(manifest_url, headers={"Accept": _MANIFEST_ACCEPT})
+    except RegistryUnreachable:
+        raise
     except RegistryError:
         return None
 
@@ -460,6 +462,8 @@ def tag_created_at(
         child_url = _manifests_url(host, path, child_digest)
         try:
             child_resp = reg.get(child_url, headers={"Accept": _MANIFEST_ACCEPT})
+        except RegistryUnreachable:
+            raise
         except RegistryError:
             return None
         if not child_resp.ok:
@@ -477,6 +481,8 @@ def tag_created_at(
     blob_url = _blobs_url(host, path, config_digest)
     try:
         blob_resp = reg.get(blob_url)
+    except RegistryUnreachable:
+        raise
     except RegistryError:
         return None
     if not blob_resp.ok:

@@ -88,6 +88,34 @@ def test_reconcile_happy_path_emits_info_logs(monkeypatch):
     assert "reconcile complete: 1 ready, 0 building, 0 pending, 0 failed" in info_messages
 
 
+def test_reconcile_pending_build_emits_normal_event(monkeypatch):
+    patch = SimpleNamespace(status={})
+    batch_api = MagicMock()
+    event_mock = MagicMock()
+
+    monkeypatch.setattr(_main, "_load_k8s_config", lambda: None)
+    monkeypatch.setattr(_main._crd, "operator_namespace", lambda: "vgpu-driver-operator")
+    monkeypatch.setattr(_main.client, "CoreV1Api", lambda: MagicMock())
+    monkeypatch.setattr(_main.client, "BatchV1Api", lambda: batch_api)
+    monkeypatch.setattr(_main.client, "CustomObjectsApi", lambda: MagicMock())
+    monkeypatch.setattr(_main._crd, "list_owned_jobs", MagicMock(return_value=[]))
+    monkeypatch.setattr(_main._registry, "list_tags", MagicMock(return_value=set()))
+    monkeypatch.setattr(_main.kopf, "event", event_mock)
+
+    _main._do_reconcile(
+        spec=_base_spec(),
+        name="my-vdi",
+        status={},
+        patch=patch,  # type: ignore[arg-type]
+        body={"metadata": {"uid": "uid-1", "generation": 3}},  # type: ignore[arg-type]
+        logger=MagicMock(),
+    )
+
+    assert patch.status["conditions"][0]["reason"] == "BuildsPending"
+    assert event_mock.call_args.kwargs["type"] == "Normal"
+    assert event_mock.call_args.kwargs["reason"] == "Reconciled"
+
+
 def test_on_job_event_logs_terminal_transition(monkeypatch):
     logger = MagicMock()
     custom_api = MagicMock()
@@ -132,4 +160,55 @@ def test_on_job_event_logs_terminal_transition(monkeypatch):
         "Ready",
         "550.54.15",
         "4593.2.0",
+    )
+
+
+def test_reconcile_gc_registry_unreachable_sets_condition(monkeypatch):
+    spec = _base_spec()
+    spec["registry"] = {
+        "repository": "registry.example.com/vgpu/drivers",
+        "authSecretRef": {"name": "reg-auth"},
+    }
+    spec["retention"] = {"enabled": True}
+    patch = SimpleNamespace(status={})
+
+    monkeypatch.setattr(_main, "_load_k8s_config", lambda: None)
+    monkeypatch.setattr(_main._crd, "operator_namespace", lambda: "vgpu-driver-operator")
+    monkeypatch.setattr(_main.client, "CoreV1Api", lambda: MagicMock())
+    monkeypatch.setattr(_main.client, "BatchV1Api", lambda: MagicMock())
+    monkeypatch.setattr(_main.client, "CustomObjectsApi", lambda: MagicMock())
+    monkeypatch.setattr(_main._crd, "get_secret", MagicMock(return_value={"config.json": b"{}"}))
+    monkeypatch.setattr(
+        _main._registry,
+        "parse_dockerconfigjson",
+        MagicMock(return_value={"username": "u", "password": "p"}),
+    )
+    monkeypatch.setattr(_main._registry, "list_tags", MagicMock(return_value=set()))
+    monkeypatch.setattr(_main._crd, "list_owned_jobs", MagicMock(return_value=[]))
+    monkeypatch.setattr(
+        _main._gc,
+        "run",
+        MagicMock(return_value={"_registryUnreachable": "registry.example.com/vgpu/drivers"}),
+    )
+    event_mock = MagicMock()
+    monkeypatch.setattr(_main.kopf, "event", event_mock)
+
+    _main._do_reconcile(
+        spec=spec,
+        name="my-vdi",
+        status={},
+        patch=patch,  # type: ignore[arg-type]
+        body={"metadata": {"uid": "uid-1", "generation": 3}},  # type: ignore[arg-type]
+        logger=MagicMock(),
+    )
+
+    condition = patch.status["conditions"][0]
+    assert condition["status"] == "False"
+    assert condition["reason"] == "RegistryUnreachable"
+    assert "garbage collection" in condition["message"]
+    event_mock.assert_called_with(
+        {"metadata": {"uid": "uid-1", "generation": 3}},
+        type="Warning",
+        reason="RegistryUnreachable",
+        message=condition["message"],
     )

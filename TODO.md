@@ -68,8 +68,8 @@ Read the plan file in full before touching the build assets.
 - **Bug 1 — Registry HTTP calls have no timeout** — FIXED:
   `registry.py` now applies `timeout=(5, 10)` to registry and bearer-token
   HTTP calls, raises typed `RegistryUnreachable` for timeouts/connection
-  failures, and `_do_reconcile` surfaces that as
-  `Reconciled=False/RegistryUnreachable` before returning.
+  failures, and `_do_reconcile` surfaces initial tag-listing and retention
+  GC outages as `Reconciled=False/RegistryUnreachable`.
 - **Bug 2 — Operator emits no INFO-level reconcile logs** — FIXED:
   `_do_reconcile` now logs reconcile start, node-discovery summary, registry
   idempotency hits, job creation, status patching, and final ready/building/
