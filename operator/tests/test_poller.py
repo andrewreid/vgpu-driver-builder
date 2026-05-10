@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from unittest.mock import MagicMock, call, patch
 
 import pytest
@@ -41,7 +42,8 @@ def _make_vdi(name: str, channels: list[str], existing_tracked: list[dict] | Non
 class TestRunOnce:
     @patch("vgpu_driver_operator.poller._configure_k8s")
     @patch("vgpu_driver_operator.flatcar.latest_release")
-    def test_success_patches_status(self, mock_latest, mock_cfg):
+    def test_success_patches_status(self, mock_latest, mock_cfg, caplog):
+        caplog.set_level(logging.INFO, logger="vgpu_driver_operator.poller")
         mock_latest.return_value = "4081.2.1"
 
         custom_api = MagicMock()
@@ -63,13 +65,19 @@ class TestRunOnce:
             assert e["flatcarVersion"] == "4081.2.1"
             assert "kernelVersion" not in e
             assert "observedAt" in e
+        messages = [record.getMessage() for record in caplog.records]
+        assert "poller: processing my-vdi channels=['stable', 'lts']" in messages
+        assert "poller: my-vdi channel=stable flatcar=4081.2.1" in messages
+        assert "poller: patched status for my-vdi (2 channels)" in messages
 
     @patch("vgpu_driver_operator.poller._configure_k8s")
     @patch("vgpu_driver_operator.flatcar.latest_release")
     def test_partial_failure_returns_1_others_still_patched(
-        self, mock_latest, mock_cfg
+        self, mock_latest, mock_cfg, caplog
     ):
         """If one channel fails, run_once returns 1 but still patches the others."""
+        caplog.set_level(logging.INFO, logger="vgpu_driver_operator.poller")
+
         def _latest(channel, arch, *, session=None):
             if channel == "alpha":
                 raise FlatcarFeedError("network error")
@@ -92,6 +100,8 @@ class TestRunOnce:
         channels_seen = {e["channel"] for e in entries}
         assert "stable" in channels_seen
         assert "alpha" not in channels_seen
+        messages = [record.getMessage() for record in caplog.records]
+        assert "poller: my-vdi channel=stable flatcar=4081.2.1" in messages
 
     @patch("vgpu_driver_operator.poller._configure_k8s")
     def test_no_objects_returns_0(self, mock_cfg):

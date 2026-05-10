@@ -7,12 +7,15 @@ import json
 from datetime import datetime, timezone
 
 import pytest
+import requests
 import responses as rsps_lib
 from responses import matchers
 
 from vgpu_driver_operator.registry import (
+    REGISTRY_TIMEOUT,
     RegistryAuth,
     RegistryError,
+    RegistryUnreachable,
     TagDeletionDisabled,
     delete_tag,
     list_tags,
@@ -102,9 +105,22 @@ class TestListTags:
             f"https://{HOST}/v2/{PATH}/tags/list",
             json={"tags": ["a", "b", "c"]},
             status=200,
+            match=[matchers.request_kwargs_matcher({"timeout": REGISTRY_TIMEOUT})],
         )
         result = list_tags(REPO, None)
         assert result == {"a", "b", "c"}
+
+    @rsps_lib.activate
+    def test_timeout_raises_registry_unreachable(self):
+        rsps_lib.add(
+            rsps_lib.GET,
+            f"https://{HOST}/v2/{PATH}/tags/list",
+            body=requests.Timeout("connect timed out"),
+            match=[matchers.request_kwargs_matcher({"timeout": REGISTRY_TIMEOUT})],
+        )
+
+        with pytest.raises(RegistryUnreachable, match=HOST):
+            list_tags(REPO, None)
 
     @rsps_lib.activate
     def test_paginated(self):
@@ -182,6 +198,26 @@ class TestListTags:
         )
         auth = RegistryAuth(username="bad", password="creds")
         with pytest.raises(RegistryError, match="rejected credentials"):
+            list_tags(REPO, auth)
+
+    @rsps_lib.activate
+    def test_bearer_challenge_token_timeout_raises_unreachable(self):
+        rsps_lib.add(
+            rsps_lib.GET,
+            f"https://{HOST}/v2/{PATH}/tags/list",
+            status=401,
+            headers={"WWW-Authenticate": BEARER_CHALLENGE},
+            match=[matchers.request_kwargs_matcher({"timeout": REGISTRY_TIMEOUT})],
+        )
+        rsps_lib.add(
+            rsps_lib.GET,
+            "https://auth.example.com/token",
+            body=requests.Timeout("read timed out"),
+            match=[matchers.request_kwargs_matcher({"timeout": REGISTRY_TIMEOUT})],
+        )
+
+        auth = RegistryAuth(username="bad", password="creds")
+        with pytest.raises(RegistryUnreachable, match="auth.example.com"):
             list_tags(REPO, auth)
 
     @rsps_lib.activate
@@ -268,6 +304,18 @@ class TestTagCreatedAt:
         assert result is None
 
     @rsps_lib.activate
+    def test_manifest_timeout_raises_registry_unreachable(self):
+        rsps_lib.add(
+            rsps_lib.GET,
+            f"https://{HOST}/v2/{PATH}/manifests/v1",
+            body=requests.Timeout("read timed out"),
+            match=[matchers.request_kwargs_matcher({"timeout": REGISTRY_TIMEOUT})],
+        )
+
+        with pytest.raises(RegistryUnreachable, match=HOST):
+            tag_created_at(REPO, "v1", None)
+
+    @rsps_lib.activate
     def test_oci_index_picks_first_child(self):
         rsps_lib.add(
             rsps_lib.GET,
@@ -347,6 +395,18 @@ class TestDeleteTag:
             status=202,
         )
         delete_tag(REPO, "v1", None)  # should not raise
+
+    @rsps_lib.activate
+    def test_head_timeout_raises_registry_unreachable(self):
+        rsps_lib.add(
+            rsps_lib.HEAD,
+            f"https://{HOST}/v2/{PATH}/manifests/v1",
+            body=requests.ConnectionError("connection refused"),
+            match=[matchers.request_kwargs_matcher({"timeout": REGISTRY_TIMEOUT})],
+        )
+
+        with pytest.raises(RegistryUnreachable, match=HOST):
+            delete_tag(REPO, "v1", None)
 
     @rsps_lib.activate
     def test_delete_405_raises_tag_deletion_disabled(self):

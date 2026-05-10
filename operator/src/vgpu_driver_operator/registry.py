@@ -21,6 +21,8 @@ from urllib.parse import urlparse
 
 import requests
 
+REGISTRY_TIMEOUT = (5, 10)
+
 # ---------------------------------------------------------------------------
 # Public types
 # ---------------------------------------------------------------------------
@@ -44,8 +46,22 @@ class RegistryError(Exception):
     """Base error for all registry operations."""
 
 
+class RegistryUnreachable(RegistryError):
+    """Raised when the registry cannot be reached due to a network failure.
+
+    Covers DNS resolution failures, TCP connection refused, and read/connect
+    timeouts.  Callers that catch ``RegistryError`` continue to work — this
+    subclass exists so reconcile can distinguish a transient network outage
+    (back off, set a status condition) from a permanent API error.
+    """
+
+
 class TagDeletionDisabled(RegistryError):
     """Raised when the registry returns HTTP 405 for DELETE /manifests/<digest>."""
+
+
+def _network_error(url: str, exc: requests.RequestException) -> RegistryUnreachable:
+    return RegistryUnreachable(f"{url}: {exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -127,6 +143,7 @@ class _RegistrySession:
     def _request(self, method: str, url: str, **kwargs: object) -> requests.Response:
         """Issue *method* request, handling bearer-token acquisition on 401."""
         auth = self._auth or {}
+        kwargs.setdefault("timeout", REGISTRY_TIMEOUT)
 
         # If a raw bearer is provided, inject it up front and skip the dance.
         if "bearer" in auth:
@@ -135,6 +152,8 @@ class _RegistrySession:
             kwargs["headers"] = headers  # type: ignore[assignment]
             try:
                 resp = self._session.request(method, url, **kwargs)  # type: ignore[arg-type]
+            except (requests.Timeout, requests.ConnectionError) as exc:
+                raise _network_error(url, exc) from exc
             except requests.RequestException as exc:
                 raise RegistryError(str(exc)) from exc
             return resp
@@ -142,6 +161,8 @@ class _RegistrySession:
         # --- Unauthenticated first attempt ---
         try:
             resp = self._session.request(method, url, **kwargs)  # type: ignore[arg-type]
+        except (requests.Timeout, requests.ConnectionError) as exc:
+            raise _network_error(url, exc) from exc
         except requests.RequestException as exc:
             raise RegistryError(str(exc)) from exc
 
@@ -170,6 +191,8 @@ class _RegistrySession:
         kwargs["headers"] = headers  # type: ignore[assignment]
         try:
             resp2 = self._session.request(method, url, **kwargs)  # type: ignore[arg-type]
+        except (requests.Timeout, requests.ConnectionError) as exc:
+            raise _network_error(url, exc) from exc
         except requests.RequestException as exc:
             raise RegistryError(str(exc)) from exc
 
@@ -196,7 +219,14 @@ class _RegistrySession:
         password = auth.get("password", "")
 
         try:
-            resp = requests.get(realm, params=params, auth=(username, password))
+            resp = requests.get(
+                realm,
+                params=params,
+                auth=(username, password),
+                timeout=REGISTRY_TIMEOUT,
+            )
+        except (requests.Timeout, requests.ConnectionError) as exc:
+            raise _network_error(realm, exc) from exc
         except requests.RequestException as exc:
             raise RegistryError(f"token fetch failed: {exc}") from exc
 
@@ -389,12 +419,12 @@ def tag_created_at(
     *,
     session: requests.Session | None = None,
 ) -> datetime | None:
-    """Return the ``created`` timestamp for *tag*, or *None* on any error.
+    """Return the ``created`` timestamp for *tag*, or *None* on content errors.
 
     Fetches the manifest, follows a manifest-list/OCI-index to the first
     child manifest, then fetches the config blob and parses its ``created``
     field (RFC3339).  Returns *None* on manifest 404, missing field, or any
-    parse error.
+    parse error. Raises :class:`RegistryUnreachable` for network failures.
     """
     host, path = _split_repository(repository)
     reg = _RegistrySession(auth, session)
@@ -402,6 +432,8 @@ def tag_created_at(
     manifest_url = _manifests_url(host, path, tag)
     try:
         resp = reg.get(manifest_url, headers={"Accept": _MANIFEST_ACCEPT})
+    except RegistryUnreachable:
+        raise
     except RegistryError:
         return None
 
@@ -430,6 +462,8 @@ def tag_created_at(
         child_url = _manifests_url(host, path, child_digest)
         try:
             child_resp = reg.get(child_url, headers={"Accept": _MANIFEST_ACCEPT})
+        except RegistryUnreachable:
+            raise
         except RegistryError:
             return None
         if not child_resp.ok:
@@ -447,6 +481,8 @@ def tag_created_at(
     blob_url = _blobs_url(host, path, config_digest)
     try:
         blob_resp = reg.get(blob_url)
+    except RegistryUnreachable:
+        raise
     except RegistryError:
         return None
     if not blob_resp.ok:

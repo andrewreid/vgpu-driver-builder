@@ -8,7 +8,11 @@ from unittest.mock import MagicMock, call, patch
 import pytest
 
 from vgpu_driver_operator.gc import parse_duration, run as gc_run
-from vgpu_driver_operator.registry import RegistryAuth, TagDeletionDisabled
+from vgpu_driver_operator.registry import (
+    RegistryAuth,
+    RegistryUnreachable,
+    TagDeletionDisabled,
+)
 
 # ---------------------------------------------------------------------------
 # parse_duration
@@ -272,6 +276,31 @@ class TestGcRun:
         )
         assert result["pruned"] == []
         mock_delete.assert_not_called()
+
+    @patch("vgpu_driver_operator.gc._registry.list_tags")
+    @patch("vgpu_driver_operator.gc._registry.tag_created_at")
+    @patch("vgpu_driver_operator.gc._registry.delete_tag")
+    def test_list_tags_unreachable_is_reported(
+        self, mock_delete, mock_created_at, mock_list_tags
+    ):
+        mock_list_tags.side_effect = RegistryUnreachable("registry.example.com")
+
+        result = gc_run(
+            spec=_SPEC,
+            status={
+                "observedNodes": [{"flatcarVersion": "4081.2.1"}],
+                "trackedChannelVersions": [],
+                "pruned": [],
+            },
+            auth=_AUTH,
+            now=_NOW,
+            logger=MagicMock(),
+            emit_event=MagicMock(),
+        )
+
+        assert "registry.example.com" in result["_registryUnreachable"]
+        mock_delete.assert_not_called()
+        mock_created_at.assert_not_called()
 
     @patch("vgpu_driver_operator.gc._registry.list_tags")
     @patch("vgpu_driver_operator.gc._registry.tag_created_at")

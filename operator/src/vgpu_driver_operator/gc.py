@@ -124,9 +124,14 @@ def run(
     # Also add Flatcar versions found in registry tags.
     repos_to_check = [r for r in [repo_runtime, repo_precompile] if r]
     all_registry_tags: dict[str, set[str]] = {}
+    registry_unreachable: _registry.RegistryUnreachable | None = None
     for repo in repos_to_check:
         try:
             tags = _registry.list_tags(repo, auth)
+        except _registry.RegistryUnreachable as exc:
+            logger.warning("gc: registry unreachable for %s: %s", repo, exc)
+            registry_unreachable = registry_unreachable or exc
+            tags = set()
         except _registry.RegistryError as exc:
             logger.warning("gc: list_tags failed for %s: %s", repo, exc)
             tags = set()
@@ -136,6 +141,19 @@ def run(
             key = parse_fn(tag)
             if key is not None:
                 history_flatcars.add(key.flatcar)
+
+    if registry_unreachable is not None:
+        retained = reconciler.compute_retained_flatcar_set(
+            current_flatcars,
+            tracked_flatcars,
+            history_flatcars,
+            keep_previous,
+        )
+        return {
+            "pruned": prev_pruned[:_MAX_PRUNED_HISTORY],
+            "retainedFlatcarVersions": sorted(retained),
+            "_registryUnreachable": str(registry_unreachable),
+        }
 
     retained: set[str] = reconciler.compute_retained_flatcar_set(
         current_flatcars,
@@ -163,7 +181,17 @@ def run(
         # Fetch tag ages.
         tag_ages: dict[str, datetime | None] = {}
         for tag in tags:
-            tag_ages[tag] = _registry.tag_created_at(repo, tag, auth)
+            try:
+                tag_ages[tag] = _registry.tag_created_at(repo, tag, auth)
+            except _registry.RegistryUnreachable as exc:
+                logger.warning(
+                    "gc: registry unreachable while reading %s:%s: %s",
+                    repo,
+                    tag,
+                    exc,
+                )
+                registry_unreachable = registry_unreachable or exc
+                tag_ages[tag] = None
 
         prunable = reconciler.compute_prunable(
             tags,
@@ -196,13 +224,25 @@ def run(
                 )
                 delete_disabled_repos.add(repo)
                 break
+            except _registry.RegistryUnreachable as exc:
+                logger.warning(
+                    "gc: registry unreachable while deleting %s:%s: %s",
+                    repo,
+                    tag,
+                    exc,
+                )
+                registry_unreachable = registry_unreachable or exc
+                break
             except _registry.RegistryError as exc:
                 logger.warning("gc: delete_tag failed for %s:%s: %s", repo, tag, exc)
 
     # Merge new pruned entries with previous history, capped at max.
     merged_pruned = (new_pruned + prev_pruned)[:_MAX_PRUNED_HISTORY]
 
-    return {
+    result = {
         "pruned": merged_pruned,
         "retainedFlatcarVersions": sorted(retained),
     }
+    if registry_unreachable is not None:
+        result["_registryUnreachable"] = str(registry_unreachable)
+    return result

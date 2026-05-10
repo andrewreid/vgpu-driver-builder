@@ -324,6 +324,8 @@ def _do_reconcile(
     now = datetime.now(tz=timezone.utc)
     now_str = now.isoformat()
     op_ns = _crd.operator_namespace()
+    generation = (body.get("metadata") or {}).get("generation", "<unknown>")
+    logger.info("reconcile: starting %s generation=%s", name, generation)
 
     core_api = client.CoreV1Api()
     batch_api = client.BatchV1Api()
@@ -361,6 +363,12 @@ def _do_reconcile(
             observed_nodes.append({"flatcarVersion": fv, "nodeCount": count})
     else:
         logger.debug("reconcile: discoverFromNodes=false, skipping node listing")
+
+    logger.info(
+        "reconcile: discovered %d flatcar version(s): %s",
+        len(node_flatcars),
+        sorted(node_flatcars),
+    )
 
     # --- 2. Tracked Flatcar versions from poller ---
     tracked_entries: list[dict] = (status or {}).get("trackedChannelVersions") or []
@@ -425,6 +433,24 @@ def _do_reconcile(
     if active_repo:
         try:
             existing_tags = _registry.list_tags(active_repo, reg_auth)
+        except _registry.RegistryUnreachable as exc:
+            message = f"Registry unreachable: {exc}"
+            logger.warning("reconcile: %s", message)
+            patch.status.update(
+                {
+                    "observedNodes": observed_nodes,
+                    "conditions": [
+                        {
+                            "type": "Reconciled",
+                            "status": "False",
+                            "reason": "RegistryUnreachable",
+                            "message": message,
+                            "lastTransitionTime": now_str,
+                        }
+                    ],
+                }
+            )
+            return
         except _registry.RegistryError as exc:
             logger.warning("reconcile: failed to list tags from %s: %s", active_repo, exc)
 
@@ -472,6 +498,20 @@ def _do_reconcile(
     # --- 6. Compute missing ---
     missing = _reconciler.compute_missing(desired, existing_tags, in_flight, precompile=precompile)
 
+    for key in sorted(desired, key=lambda k: (k.driver, k.flatcar)):
+        existing_tag = ""
+        if key.precompile:
+            existing_tag = next(
+                (tag for tag in existing_tags if _reconciler.matches_precompile_tag(key, tag)),
+                "",
+            )
+        else:
+            tag = _reconciler.runtime_tag(key)
+            if tag in existing_tags:
+                existing_tag = tag
+        if existing_tag:
+            logger.info("reconcile: tag %s already in registry, skipping", existing_tag)
+
     # --- 7. Create Jobs for missing keys ---
     s3_secret_name: str = (
         (spec.get("source") or {}).get("credentialsSecretRef") or {}
@@ -496,6 +536,7 @@ def _do_reconcile(
         )
         jname = manifest["metadata"]["name"]
         try:
+            logger.info("reconcile: creating job %s for %s", jname, key)
             batch_api.create_namespaced_job(op_ns, manifest)
             logger.info("reconcile: created Job %s", jname)
         except client.ApiException as exc:
@@ -586,22 +627,76 @@ def _do_reconcile(
                 logger=logger,
                 emit_event=_emit,
             )
+            registry_unreachable = gc_result.pop("_registryUnreachable", "")
             new_status.update(gc_result)
+            if registry_unreachable:
+                message = (
+                    "Registry unreachable during garbage collection: "
+                    f"{registry_unreachable}"
+                )
+                logger.warning("reconcile: %s", message)
+                new_status["conditions"] = [
+                    {
+                        "type": "Reconciled",
+                        "status": "False",
+                        "reason": "RegistryUnreachable",
+                        "message": message,
+                        "lastTransitionTime": now_str,
+                    }
+                ]
+        except _registry.RegistryUnreachable as exc:
+            message = f"Registry unreachable during garbage collection: {exc}"
+            logger.warning("reconcile: %s", message)
+            new_status["conditions"] = [
+                {
+                    "type": "Reconciled",
+                    "status": "False",
+                    "reason": "RegistryUnreachable",
+                    "message": message,
+                    "lastTransitionTime": now_str,
+                }
+            ]
         except Exception as exc:
             logger.warning("reconcile: GC failed: %s", exc)
 
     # --- 10. Apply status patch ---
     patch.status.update(new_status)
+    logger.info(
+        "reconcile: patched status for %s (%d build(s), condition=%s)",
+        name,
+        len(builds),
+        new_status["conditions"][0]["reason"],
+    )
 
     # --- 11. Emit summary event ---
+    ready_count = sum(1 for b in builds if b["phase"] == "Ready")
+    building_count = sum(1 for b in builds if b["phase"] == "Building")
+    pending_count = sum(1 for b in builds if b["phase"] == "Pending")
+    failed_count = sum(1 for b in builds if b["phase"] == "Failed")
+    logger.info(
+        "reconcile complete: %d ready, %d building, %d pending, %d failed",
+        ready_count,
+        building_count,
+        pending_count,
+        failed_count,
+    )
+    final_condition = new_status["conditions"][0]
     summary = (
         f"Reconciled: {len(builds)} build(s), "
-        f"{sum(1 for b in builds if b['phase'] == 'Ready')} ready, "
+        f"{ready_count} ready, "
         f"{len(missing)} job(s) created"
     )
     logger.info("reconcile: %s", summary)
     try:
-        kopf.event(body, type="Normal", reason="Reconciled", message=summary)
+        if final_condition["reason"] == "RegistryUnreachable":
+            kopf.event(
+                body,
+                type="Warning",
+                reason=final_condition["reason"],
+                message=final_condition["message"],
+            )
+        else:
+            kopf.event(body, type="Normal", reason="Reconciled", message=summary)
     except Exception:
         pass
 

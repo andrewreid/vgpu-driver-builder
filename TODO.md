@@ -65,6 +65,19 @@ Read the plan file in full before touching the build assets.
 
 ## 5. Resolved (kept for context)
 
+- **Bug 1 — Registry HTTP calls have no timeout** — FIXED:
+  `registry.py` now applies `timeout=(5, 10)` to registry and bearer-token
+  HTTP calls, raises typed `RegistryUnreachable` for timeouts/connection
+  failures, and `_do_reconcile` surfaces initial tag-listing and retention
+  GC outages as `Reconciled=False/RegistryUnreachable`.
+- **Bug 2 — Operator emits no INFO-level reconcile logs** — FIXED:
+  `_do_reconcile` now logs reconcile start, node-discovery summary, registry
+  idempotency hits, job creation, status patching, and final ready/building/
+  pending/failed counts. Existing `on_job_event` and poller INFO logs now have
+  regression coverage.
+- **Bug 3 — `operator/Dockerfile` missing `ENV PYTHONUNBUFFERED=1`** —
+  FIXED: `operator/Dockerfile` sets `PYTHONUNBUFFERED=1` so `kubectl logs`
+  receives Python stdout promptly.
 - **Test-plan label mismatch** — RESOLVED: grep confirmed no live docs use
   `=vgpu-build`; only the Job *name* prefix uses `vgpu-build-` which is
   unrelated. Note kept in this file only; closed.
