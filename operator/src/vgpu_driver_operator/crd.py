@@ -98,7 +98,10 @@ def list_owned_jobs(
         owners = (item.metadata.owner_references or [])
         for ref in owners:
             if ref.uid == owner_uid:
-                jobs.append(item.to_dict())
+                # sanitize_for_serialization yields camelCase API JSON;
+                # to_dict() yields snake_case which silently breaks any
+                # caller reading e.g. status.conditions[].lastTransitionTime.
+                jobs.append(client.ApiClient().sanitize_for_serialization(item))
                 break
     return jobs
 

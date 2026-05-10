@@ -341,7 +341,11 @@ def _do_reconcile(
         label_selector = ",".join(f"{k}={v}" for k, v in node_selector.items()) or None
         try:
             nodes_resp = core_api.list_node(label_selector=label_selector)
-            nodes = [n.to_dict() for n in nodes_resp.items]
+            # sanitize_for_serialization yields API-shape camelCase JSON
+            # (osImage, nodeInfo, ...). V1Node.to_dict() yields snake_case
+            # which silently breaks flatcar_version_from_node parsing.
+            api_client = client.ApiClient()
+            nodes = [api_client.sanitize_for_serialization(n) for n in nodes_resp.items]
         except Exception as exc:
             logger.warning("reconcile: failed to list nodes: %s", exc)
             nodes = []

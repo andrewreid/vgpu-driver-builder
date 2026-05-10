@@ -132,3 +132,13 @@ Read the plan file in full before touching the build assets.
   kernel from base image; latest commit at the time of writing).
 - **Plan BUG-1, 3, 4, 5** (ConfigMap env injection, extraArgs, startupProbe,
   `app.kubernetes.io/component=builder` label) — all FIXED pre-merge.
+- **Critical: discoverFromNodes returned no versions on real Flatcar
+  cluster** — `core_api.list_node().items[*].to_dict()` emits snake_case
+  (`os_image`, `node_info`); parser reads camelCase as Kubernetes API JSON.
+  All Flatcar nodes silently skipped, CR stuck at `NoFlatcarVersions`.
+  Untested live until 2026-05-09 because all prior runs used
+  `discoverFromNodes: false`. FIXED: switched both `main.py:343-344` and
+  `crd.py:99-101` to `client.ApiClient().sanitize_for_serialization()`.
+  Two regression tests added in `test_flatcar.py`: one positive path through
+  `sanitize_for_serialization`, one permanent guard asserting `to_dict()`
+  fails to parse so any regression is visible immediately.

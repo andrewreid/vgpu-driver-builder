@@ -179,3 +179,54 @@ class TestLatestRelease:
             status=200,
         )
         assert latest_release("stable", "arm64") == "4230.2.3"
+
+
+# ---------------------------------------------------------------------------
+# Integration: V1Node serialization shape (regression for snake_case bug)
+# ---------------------------------------------------------------------------
+
+
+class TestFlatcarVersionFromNodeIntegration:
+    """V1Node objects from kubernetes client must be sanitized to API-shape
+    JSON (camelCase) before flatcar_version_from_node() can parse them.
+
+    Regression: a real Flatcar RKE2 cluster reported NoFlatcarVersions for
+    every node because main.py was calling V1Node.to_dict(), which emits
+    snake_case (os_image / node_info), not camelCase (osImage / nodeInfo)
+    that the parser expects.
+    """
+
+    def _v1_flatcar_node(self):
+        from kubernetes import client
+
+        return client.V1Node(
+            metadata=client.V1ObjectMeta(name="gpu-01", labels={}),
+            status=client.V1NodeStatus(
+                node_info=client.V1NodeSystemInfo(
+                    architecture="amd64",
+                    boot_id="bid",
+                    container_runtime_version="containerd://2.2.3",
+                    kernel_version="6.12.81-flatcar",
+                    kube_proxy_version="v1.35.4",
+                    kubelet_version="v1.35.4",
+                    machine_id="mid",
+                    operating_system="linux",
+                    os_image="Flatcar Container Linux by Kinvolk 4593.2.0 (Oklo)",
+                    system_uuid="uuid",
+                )
+            ),
+        )
+
+    def test_sanitize_for_serialization_parses(self):
+        from kubernetes import client
+
+        node = self._v1_flatcar_node()
+        sanitized = client.ApiClient().sanitize_for_serialization(node)
+        assert flatcar_version_from_node(sanitized) == "4593.2.0"
+
+    def test_to_dict_does_not_parse(self):
+        """Permanent guard: anyone who regresses to V1Node.to_dict() will
+        see this assertion fail."""
+        node = self._v1_flatcar_node()
+        snake = node.to_dict()
+        assert flatcar_version_from_node(snake) is None
