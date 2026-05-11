@@ -339,6 +339,20 @@ class TestRegistrySecretVolume:
         mount_paths = [m["mountPath"] for m in _get_volume_mounts(manifest)]
         assert "/kaniko/.docker/" not in mount_paths
 
+    def test_registry_secret_changes_job_name(self):
+        with_secret = build_job_manifest(
+            spec=_SPEC,
+            key=_RUNTIME_KEY,
+            **_COMMON_KWARGS,
+        )
+        without_secret = build_job_manifest(
+            spec=_SPEC,
+            key=_RUNTIME_KEY,
+            **{**_COMMON_KWARGS, "registry_secret_name": None},
+        )
+
+        assert with_secret["metadata"]["name"] != without_secret["metadata"]["name"]
+
 
 # ---------------------------------------------------------------------------
 # Basic structure tests

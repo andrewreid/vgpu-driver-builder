@@ -454,8 +454,36 @@ def _do_reconcile(
         except _registry.RegistryError as exc:
             logger.warning("reconcile: failed to list tags from %s: %s", active_repo, exc)
 
-    # --- 5. In-flight Jobs ---
+    # --- 5. Build-job inputs ---
     crd_uid = (body.get("metadata") or {}).get("uid", "")
+    s3_secret_name: str = (
+        (spec.get("source") or {}).get("credentialsSecretRef") or {}
+    ).get("name") or os.environ.get("S3_SECRET_NAME", "s3-driver-storage-secret")
+    reg_secret_name: str | None = auth_secret_name or None
+    dockerfile_cm = os.environ.get("DOCKERFILE_CONFIGMAP", "driver-build-files")
+    buildfiles_cm = os.environ.get("BUILDFILES_CONFIGMAP", "driver-build-files")
+    crd_name = name
+
+    desired_manifests = {
+        key: _jf.build_job_manifest(
+            crd_namespace=op_ns,
+            crd_name=crd_name,
+            crd_uid=crd_uid,
+            spec=spec,
+            key=key,
+            s3_secret_name=s3_secret_name,
+            registry_secret_name=reg_secret_name,
+            dockerfile_configmap=dockerfile_cm,
+            buildfiles_configmap=buildfiles_cm,
+            build_created=now_str,
+        )
+        for key in desired
+    }
+    desired_job_names = {
+        key: manifest["metadata"]["name"] for key, manifest in desired_manifests.items()
+    }
+
+    # --- 6. In-flight Jobs ---
     try:
         jobs = _crd.list_owned_jobs(batch_api, op_ns, crd_uid)
     except Exception as exc:
@@ -490,12 +518,34 @@ def _do_reconcile(
 
         key = _reconciler.BuildKey(driver=dv, flatcar=fv, precompile=precompile)
 
+        if (
+            key in desired_job_names
+            and phase in ("Pending", "Building")
+            and jname != desired_job_names[key]
+        ):
+            logger.info(
+                "reconcile: deleting stale Job %s for %s; desired Job is %s",
+                jname,
+                key,
+                desired_job_names[key],
+            )
+            try:
+                batch_api.delete_namespaced_job(
+                    name=jname,
+                    namespace=op_ns,
+                    propagation_policy="Background",
+                )
+            except client.ApiException as exc:
+                if exc.status != 404:
+                    logger.warning("reconcile: failed to delete stale Job %s: %s", jname, exc)
+            continue
+
         if phase in ("Pending", "Building"):
             in_flight.add(key)
         job_phase_map[jname] = phase
         job_key_map[key] = jname
 
-    # --- 6. Compute missing ---
+    # --- 7. Compute missing ---
     missing = _reconciler.compute_missing(desired, existing_tags, in_flight, precompile=precompile)
 
     for key in sorted(desired, key=lambda k: (k.driver, k.flatcar)):
@@ -512,28 +562,9 @@ def _do_reconcile(
         if existing_tag:
             logger.info("reconcile: tag %s already in registry, skipping", existing_tag)
 
-    # --- 7. Create Jobs for missing keys ---
-    s3_secret_name: str = (
-        (spec.get("source") or {}).get("credentialsSecretRef") or {}
-    ).get("name") or os.environ.get("S3_SECRET_NAME", "s3-driver-storage-secret")
-    reg_secret_name: str | None = auth_secret_name or None
-    dockerfile_cm = os.environ.get("DOCKERFILE_CONFIGMAP", "driver-build-files")
-    buildfiles_cm = os.environ.get("BUILDFILES_CONFIGMAP", "driver-build-files")
-    crd_name = name
-
+    # --- 8. Create Jobs for missing keys ---
     for key in missing:
-        manifest = _jf.build_job_manifest(
-            crd_namespace=op_ns,
-            crd_name=crd_name,
-            crd_uid=crd_uid,
-            spec=spec,
-            key=key,
-            s3_secret_name=s3_secret_name,
-            registry_secret_name=reg_secret_name,
-            dockerfile_configmap=dockerfile_cm,
-            buildfiles_configmap=buildfiles_cm,
-            build_created=now_str,
-        )
+        manifest = desired_manifests[key]
         jname = manifest["metadata"]["name"]
         try:
             logger.info("reconcile: creating job %s for %s", jname, key)
@@ -545,7 +576,7 @@ def _do_reconcile(
             else:
                 logger.warning("reconcile: failed to create Job %s: %s", jname, exc)
 
-    # --- 8. Build status payload ---
+    # --- 9. Build status payload ---
     # For precompile builds: find any existing tag matching the driver/flatcar pair
     # to report back in status (kernel is embedded in the tag by the build job).
     def _find_tag_for_key(key: _reconciler.BuildKey) -> str:
@@ -606,7 +637,7 @@ def _do_reconcile(
         "conditions": [condition],
     }
 
-    # --- 9. GC (if enabled) ---
+    # --- 10. GC (if enabled) ---
     retention: dict = spec.get("retention") or {}
     if retention.get("enabled") and reg_auth is not None:
         merged_status = dict(status or {})
