@@ -48,8 +48,6 @@ spec:
               value: {{ .Values.buildAssets.configMapName }}
             - name: S3_SECRET_NAME
               value: {{ .Values.s3.secretName }}
-            - name: REGISTRY_SECRET_NAME
-              value: {{ .Values.registry.secretName }}
           ports:
             - name: healthz
               containerPort: 8080

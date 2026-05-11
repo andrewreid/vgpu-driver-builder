@@ -516,7 +516,7 @@ def _do_reconcile(
     s3_secret_name: str = (
         (spec.get("source") or {}).get("credentialsSecretRef") or {}
     ).get("name") or os.environ.get("S3_SECRET_NAME", "s3-driver-storage-secret")
-    reg_secret_name: str | None = auth_secret_name or os.environ.get("REGISTRY_SECRET_NAME") or None
+    reg_secret_name: str | None = auth_secret_name or None
     dockerfile_cm = os.environ.get("DOCKERFILE_CONFIGMAP", "driver-build-files")
     buildfiles_cm = os.environ.get("BUILDFILES_CONFIGMAP", "driver-build-files")
     crd_name = name

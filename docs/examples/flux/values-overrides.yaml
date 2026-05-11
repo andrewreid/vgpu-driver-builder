@@ -52,11 +52,12 @@ s3:
 
 # `registry.create=true` works but is rarely useful — the chart only supports
 # inline username/password, which is the wrong shape for most production setups
-# (use ExternalSecrets / SOPS / IRSA / etc.). Leave create=false and supply the
-# Secret yourself.
+# (use ExternalSecrets / SOPS / IRSA / etc.). Leave secretName empty for
+# anonymous registries. For private registries, provide a Secret yourself and
+# reference it from spec.registry.authSecretRef.
 registry:
   create: false
-  secretName: private-registry-secret
+  secretName: ""
 
 # Operator log verbosity. DEBUG produces useful kopf event traces during
 # initial bring-up.

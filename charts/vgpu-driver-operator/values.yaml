@@ -81,8 +81,9 @@ s3:
 registry:
   # -- Set to true to create a docker-registry Secret from the values below
   create: false
-  # -- Name of the registry pull Secret (pre-existing or created by this chart)
-  secretName: private-registry-secret
+  # -- Name of the registry auth Secret to create. Reference this name from
+  # -- spec.registry.authSecretRef when the target registry requires auth.
+  secretName: ""
   # -- Registry URL (e.g. ghcr.io)
   url: ""
   # -- Registry username

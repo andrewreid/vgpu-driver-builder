@@ -103,9 +103,10 @@ Read the plan file in full before touching the build assets.
   leads with OCI install (`helm install ... oci://ghcr.io/andrewreid/charts/vgpu-driver-operator`)
   and retains local-path install for development.
 - **Bug 6/8** — operator unconditionally provided a registry-secret name even
-  without `authSecretRef`. FIXED: dropped hardcoded default in `main.py`,
-  `reg_secret_name` now flows as `None` when neither `authSecretRef` nor
-  `REGISTRY_SECRET_NAME` env is set, so `job_factory.py` skips the secret mount.
+  without `authSecretRef`. FIXED: registry auth is now opt-in via
+  `spec.registry.authSecretRef`; Helm no longer injects `REGISTRY_SECRET_NAME`,
+  and `main.py` ignores that env fallback so anonymous registries do not mount
+  `docker-config`.
 - **Bug 9** — URI placeholder syntax mismatch. FIXED: `job_factory.py`
   accepts both `${DRIVER_VERSION}` and `{driverVersion}` (Python str.format
   style). Tests added.
