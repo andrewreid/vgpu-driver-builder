@@ -73,31 +73,13 @@ COPY NVIDIA-Linux-x86_64-${DRIVER_VERSION}.run /drivers/
 COPY nvidia-driver /usr/local/bin/nvidia-driver
 RUN chmod +x /usr/local/bin/nvidia-driver
 
-# Build precompiled modules using the Flatcar developer toolchain.
-# apt cache mounts avoid re-downloading packages on repeated builds.
+# Build precompiled modules using the Flatcar developer toolchain. The driver
+# script lets Kbuild/modpost produce final .ko files and validates module
+# metadata before the image can be pushed.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     set -euo pipefail \
-    && cd /drivers \
     && export DRIVER_ARCH="x86_64" \
-    && rm -rf NVIDIA-Linux-${DRIVER_ARCH}-${DRIVER_VERSION}-grid NVIDIA-Linux-${DRIVER_ARCH}-${DRIVER_VERSION} \
-    && sh NVIDIA-Linux-${DRIVER_ARCH}-${DRIVER_VERSION}.run -x \
-    && cd NVIDIA-Linux-${DRIVER_ARCH}-${DRIVER_VERSION}-grid \
-    && ./nvidia-installer --silent \
-         --no-kernel-module \
-         --no-install-compat32-libs \
-         --no-nouveau-check \
-         --no-nvidia-modprobe \
-         --no-rpms \
-         --no-backup \
-         --no-check-for-alternate-installs \
-         --no-libglx-indirect \
-         --no-install-libglvnd \
-         --x-prefix=/tmp/null \
-         --x-module-path=/tmp/null \
-         --x-library-path=/tmp/null \
-         --x-sysconfig-path=/tmp/null \
-    && cd / \
     && nvidia-driver build-precompiled \
     && rm -rf /drivers/NVIDIA-Linux-${DRIVER_ARCH}-${DRIVER_VERSION}.run
 
@@ -122,7 +104,8 @@ ARG BUILD_CREATED=""
 ENV DRIVER_VERSION=${DRIVER_VERSION} \
     NVIDIA_VISIBLE_DEVICES=void \
     DRIVER_TYPE=${DRIVER_TYPE} \
-    VGPU_LICENSE_SERVER_TYPE=${VGPU_LICENSE_SERVER_TYPE}
+    VGPU_LICENSE_SERVER_TYPE=${VGPU_LICENSE_SERVER_TYPE} \
+    NVIDIA_PRECOMPILED_IMAGE=true
 
 # apt cache mounts; omit rm -rf /var/lib/apt/lists/* — cache mount handles eviction.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
