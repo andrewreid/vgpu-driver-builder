@@ -189,6 +189,84 @@ def test_reconcile_replaces_stale_inflight_job(monkeypatch):
     assert manifest["metadata"]["name"] != "vgpu-build-runtime-stale"
 
 
+def test_reconcile_deletes_completed_job_when_registry_tag_missing(monkeypatch):
+    patch = SimpleNamespace(status={})
+    batch_api = MagicMock()
+    completed_job = {
+        "metadata": {
+            "name": "vgpu-build-runtime-550-54-15-fc-4593-2-0",
+            "labels": {
+                "vgpu.flatcar.io/driver-version": "550.54.15",
+                "vgpu.flatcar.io/flatcar-version": "4593.2.0",
+            },
+        },
+        "status": {"succeeded": 1},
+    }
+
+    monkeypatch.setattr(_main, "_load_k8s_config", lambda: None)
+    monkeypatch.setattr(_main._crd, "operator_namespace", lambda: "vgpu-driver-operator")
+    monkeypatch.setattr(_main.client, "CoreV1Api", lambda: MagicMock())
+    monkeypatch.setattr(_main.client, "BatchV1Api", lambda: batch_api)
+    monkeypatch.setattr(_main.client, "CustomObjectsApi", lambda: MagicMock())
+    monkeypatch.setattr(_main._crd, "list_owned_jobs", MagicMock(return_value=[completed_job]))
+    monkeypatch.setattr(_main._registry, "list_tags", MagicMock(return_value=set()))
+    monkeypatch.setattr(_main.kopf, "event", MagicMock())
+
+    _main._do_reconcile(
+        spec=_base_spec(),
+        name="my-vdi",
+        status={},
+        patch=patch,  # type: ignore[arg-type]
+        body={"metadata": {"uid": "uid-1", "generation": 3}},  # type: ignore[arg-type]
+        logger=MagicMock(),
+    )
+
+    batch_api.delete_namespaced_job.assert_called_once_with(
+        name="vgpu-build-runtime-550-54-15-fc-4593-2-0",
+        namespace="vgpu-driver-operator",
+        propagation_policy="Background",
+    )
+
+
+def test_reconcile_keeps_completed_job_when_registry_tag_exists(monkeypatch):
+    patch = SimpleNamespace(status={})
+    batch_api = MagicMock()
+    completed_job = {
+        "metadata": {
+            "name": "vgpu-build-runtime-550-54-15-fc-4593-2-0",
+            "labels": {
+                "vgpu.flatcar.io/driver-version": "550.54.15",
+                "vgpu.flatcar.io/flatcar-version": "4593.2.0",
+            },
+        },
+        "status": {"succeeded": 1},
+    }
+
+    monkeypatch.setattr(_main, "_load_k8s_config", lambda: None)
+    monkeypatch.setattr(_main._crd, "operator_namespace", lambda: "vgpu-driver-operator")
+    monkeypatch.setattr(_main.client, "CoreV1Api", lambda: MagicMock())
+    monkeypatch.setattr(_main.client, "BatchV1Api", lambda: batch_api)
+    monkeypatch.setattr(_main.client, "CustomObjectsApi", lambda: MagicMock())
+    monkeypatch.setattr(_main._crd, "list_owned_jobs", MagicMock(return_value=[completed_job]))
+    monkeypatch.setattr(
+        _main._registry,
+        "list_tags",
+        MagicMock(return_value={"550.54.15-flatcar4593.2.0"}),
+    )
+    monkeypatch.setattr(_main.kopf, "event", MagicMock())
+
+    _main._do_reconcile(
+        spec=_base_spec(),
+        name="my-vdi",
+        status={},
+        patch=patch,  # type: ignore[arg-type]
+        body={"metadata": {"uid": "uid-1", "generation": 3}},  # type: ignore[arg-type]
+        logger=MagicMock(),
+    )
+
+    batch_api.delete_namespaced_job.assert_not_called()
+
+
 def test_on_job_event_logs_terminal_transition(monkeypatch):
     logger = MagicMock()
     custom_api = MagicMock()
