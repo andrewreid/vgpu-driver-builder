@@ -132,7 +132,6 @@ def build_job_manifest(
     if cache_repo:
         cache_flags = [
             f"--import-cache type=registry,ref={cache_repo}:shared",
-            f"--export-cache type=registry,ref={cache_repo}:shared,mode=max",
         ]
 
     # S3 URI from template.

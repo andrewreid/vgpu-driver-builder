@@ -126,6 +126,8 @@ RUN set -euo pipefail \
     && cd /tmp/NVIDIA-Linux-x86_64-${DRIVER_VERSION}-grid \
     && ./nvidia-installer --silent \
          --no-kernel-module \
+         --no-systemd \
+         --no-opengl-files \
          --no-install-compat32-libs \
          --no-nouveau-check \
          --no-nvidia-modprobe \

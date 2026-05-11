@@ -32,6 +32,36 @@ stage_modules() {
     touch "$1/nvidia.ko" "$1/nvidia-modeset.ko" "$1/nvidia-uvm.ko"
 }
 
+write_symbol_dependency_mocks() {
+    mkdir -p "${BATS_TEST_TMPDIR}/bin"
+    cat > "${BATS_TEST_TMPDIR}/bin/modinfo" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [ "$1" = "-k" ] && [ "$3" = "-n" ]; then
+    case "$4" in
+        video)     printf '%s/%s/kernel/drivers/acpi/video.ko.xz\n' "${KERNEL_MODULES_ROOT:-/lib/modules}" "$2" ;;
+        backlight) printf '%s/%s/kernel/drivers/video/backlight/backlight.ko.xz\n' "${KERNEL_MODULES_ROOT:-/lib/modules}" "$2" ;;
+        *)         exit 1 ;;
+    esac
+    exit 0
+fi
+exec /usr/bin/modinfo "$@"
+EOF
+    chmod +x "${BATS_TEST_TMPDIR}/bin/modinfo"
+    cat > "${BATS_TEST_TMPDIR}/bin/nm" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+case "${*: -1}" in
+    *nvidia-modeset.ko)
+        printf '                 U acpi_video_register_backlight\n'
+        printf '                 U backlight_device_get_by_type\n'
+        ;;
+esac
+EOF
+    chmod +x "${BATS_TEST_TMPDIR}/bin/nm"
+    export PATH="${BATS_TEST_TMPDIR}/bin:${PATH}"
+}
+
 @test "_log emits RFC3339 timestamp + level + message" {
     run _log INFO hello world
     [ "$status" -eq 0 ]
@@ -119,4 +149,34 @@ stage_modules() {
     run _validate_precompiled_modules "${install_dir}"
     [ "$status" -eq 1 ]
     [[ "$output" == *"Invalid NVIDIA module metadata for nvidia-modeset.ko: name 'nvidia-modeset' does not match 'nvidia_modeset'"* ]]
+}
+
+@test "_stage_kernel_symbol_dependencies copies provider modules and recursive deps" {
+    export KERNEL_VERSION=6.12.81-flatcar
+    export KERNEL_MODULES_ROOT="${BATS_TEST_TMPDIR}/lib/modules"
+    local kernel_tree="${KERNEL_MODULES_ROOT}/${KERNEL_VERSION}"
+    local install_dir="${BATS_TEST_TMPDIR}/install"
+
+    mkdir -p "${kernel_tree}/kernel/drivers/acpi" \
+             "${kernel_tree}/kernel/drivers/platform/x86" \
+             "${kernel_tree}/kernel/drivers/video/backlight"
+    touch "${kernel_tree}/kernel/drivers/acpi/video.ko.xz" \
+          "${kernel_tree}/kernel/drivers/platform/x86/wmi.ko.xz" \
+          "${kernel_tree}/kernel/drivers/video/backlight/backlight.ko.xz"
+    cat > "${kernel_tree}/modules.dep" <<'EOF'
+kernel/drivers/acpi/video.ko.xz: kernel/drivers/platform/x86/wmi.ko.xz kernel/drivers/video/backlight/backlight.ko.xz
+kernel/drivers/video/backlight/backlight.ko.xz: kernel/drivers/platform/x86/wmi.ko.xz
+EOF
+    cat > "${kernel_tree}/modules.symbols" <<'EOF'
+alias symbol:acpi_video_register_backlight video
+alias symbol:backlight_device_get_by_type backlight
+EOF
+    stage_modules "${install_dir}"
+    write_symbol_dependency_mocks
+
+    run _stage_kernel_symbol_dependencies "${install_dir}"
+    [ "$status" -eq 0 ]
+    [ -f "${install_dir}/kernel/drivers/acpi/video.ko.xz" ]
+    [ -f "${install_dir}/kernel/drivers/platform/x86/wmi.ko.xz" ]
+    [ -f "${install_dir}/kernel/drivers/video/backlight/backlight.ko.xz" ]
 }

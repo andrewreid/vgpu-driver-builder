@@ -286,7 +286,7 @@ See the [VGPUDriverImage CRD definition](../charts/vgpu-driver-operator/crds/vgp
 |-------|------|---------|-------------|
 | `source.credentialsSecretRef.name` | string | (none) | Secret name for S3 credentials (keys: `accessKeyId`, `secretAccessKey`). Required if S3 is private. |
 | `registry.repositoryPrecompiled` | string | (none) | Target repository for precompiled images. Only used if `precompile: true`. |
-| `registry.cacheRepository` | string | (none) | BuildKit cache repository. Speeds up rebuilds. |
+| `registry.cacheRepository` | string | (none) | Optional BuildKit cache repository to import from. Cache export is disabled because it is expensive for infrequent builds. |
 | `registry.authSecretRef.name` | string | (none) | Secret name for registry credentials (key: `.dockerconfigjson`). Required if registry is private. |
 
 #### Flatcar discovery
@@ -354,7 +354,8 @@ spec:
   registry:
     repository: harbor.example.com/vgpu-driver
     repositoryPrecompiled: harbor.example.com/vgpu-driver-precompiled
-    cacheRepository: harbor.example.com/vgpu-driver-cache
+    # Optional import-only BuildKit cache source.
+    # cacheRepository: harbor.example.com/vgpu-driver-cache
     authSecretRef:
       name: private-registry-secret
 
@@ -411,7 +412,8 @@ spec:
       name: s3-driver-storage-secret
   registry:
     repository: registry.example.com/vgpu-driver
-    cacheRepository: registry.example.com/vgpu-driver-cache
+    # Optional import-only BuildKit cache source.
+    # cacheRepository: registry.example.com/vgpu-driver-cache
   flatcar:
     discoverFromNodes: false          # cluster is not running Flatcar
     versions: ["4593.2.0"]           # explicit Flatcar version to build for
