@@ -493,6 +493,26 @@ def _do_reconcile(
     in_flight: set[_reconciler.BuildKey] = set()
     job_phase_map: dict[str, str] = {}  # job_name -> phase
     job_key_map: dict[_reconciler.BuildKey, str] = {}  # key -> job_name
+    deleted_job_names: set[str] = set()
+
+    def _key_has_registry_tag(key: _reconciler.BuildKey) -> bool:
+        if key.precompile:
+            return any(_reconciler.matches_precompile_tag(key, tag) for tag in existing_tags)
+        return _reconciler.runtime_tag(key) in existing_tags
+
+    def _delete_owned_job(jname: str, key: _reconciler.BuildKey, reason: str) -> None:
+        logger.info("reconcile: deleting %s Job %s for %s", reason, jname, key)
+        try:
+            batch_api.delete_namespaced_job(
+                name=jname,
+                namespace=op_ns,
+                propagation_policy="Background",
+            )
+            deleted_job_names.add(jname)
+        except client.ApiException as exc:
+            if exc.status != 404:
+                logger.warning("reconcile: failed to delete Job %s: %s", jname, exc)
+
     for job in jobs:
         jmeta = job.get("metadata") or {}
         jlabels: dict = jmeta.get("labels") or {}
@@ -523,21 +543,11 @@ def _do_reconcile(
             and phase in ("Pending", "Building")
             and jname != desired_job_names[key]
         ):
-            logger.info(
-                "reconcile: deleting stale Job %s for %s; desired Job is %s",
-                jname,
-                key,
-                desired_job_names[key],
-            )
-            try:
-                batch_api.delete_namespaced_job(
-                    name=jname,
-                    namespace=op_ns,
-                    propagation_policy="Background",
-                )
-            except client.ApiException as exc:
-                if exc.status != 404:
-                    logger.warning("reconcile: failed to delete stale Job %s: %s", jname, exc)
+            _delete_owned_job(jname, key, f"stale (desired {desired_job_names[key]})")
+            continue
+
+        if key in desired_job_names and phase in ("Ready", "Failed") and not _key_has_registry_tag(key):
+            _delete_owned_job(jname, key, f"terminal {phase} without registry tag")
             continue
 
         if phase in ("Pending", "Building"):
@@ -566,6 +576,9 @@ def _do_reconcile(
     for key in missing:
         manifest = desired_manifests[key]
         jname = manifest["metadata"]["name"]
+        if jname in deleted_job_names:
+            logger.info("reconcile: waiting for deleted Job %s to disappear before recreating", jname)
+            continue
         try:
             logger.info("reconcile: creating job %s for %s", jname, key)
             batch_api.create_namespaced_job(op_ns, manifest)

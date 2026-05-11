@@ -119,11 +119,12 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
          pciutils \
          util-linux
 
-# Copy the already-extracted installer tree from builder (no second .run needed).
-COPY --from=builder /drivers/NVIDIA-Linux-x86_64-${DRIVER_VERSION}-grid /tmp/NVIDIA-Linux-x86_64-${DRIVER_VERSION}-grid
-
-RUN set -euo pipefail \
-    && cd /tmp/NVIDIA-Linux-x86_64-${DRIVER_VERSION}-grid \
+# Bind the already-extracted installer tree from builder only for this RUN.
+# A COPY would leave the full extracted tree in a committed image layer even
+# after deletion, adding hundreds of MiB to the final runtime image.
+RUN --mount=type=bind,from=builder,source=/drivers/NVIDIA-Linux-x86_64-${DRIVER_VERSION}-grid,target=/tmp/nvidia-installer,ro \
+    set -euo pipefail \
+    && cd /tmp/nvidia-installer \
     && ./nvidia-installer --silent \
          --no-kernel-module \
          --no-systemd \
@@ -139,9 +140,7 @@ RUN set -euo pipefail \
          --x-prefix=/tmp/null \
          --x-module-path=/tmp/null \
          --x-library-path=/tmp/null \
-         --x-sysconfig-path=/tmp/null \
-    && cd / \
-    && rm -rf /tmp/NVIDIA-Linux-x86_64-${DRIVER_VERSION}-grid
+         --x-sysconfig-path=/tmp/null
 
 RUN mkdir -p /opt/nvidia/${DRIVER_VERSION}/lib/modules
 COPY --from=builder /opt/nvidia/${DRIVER_VERSION}/lib/modules /opt/nvidia/${DRIVER_VERSION}/lib/modules
