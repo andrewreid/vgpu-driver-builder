@@ -98,8 +98,18 @@ def build_job_manifest(
 
     buildkit_image: str = build_cfg.get("buildkitImage") or _DEFAULT_BUILDKIT_IMAGE
 
-    # Compute inputs hash for the job name.
-    spec_hash = hashlib.sha256(str(sorted(spec.items())).encode()).hexdigest()[:8]
+    # Compute inputs hash for the job name. Include inputs that change the
+    # immutable Job template even when the CR spec is unchanged.
+    template_inputs = {
+        "spec": sorted(spec.items()),
+        "s3_secret_name": s3_secret_name,
+        "registry_secret_name": registry_secret_name or "",
+        "dockerfile_configmap": dockerfile_configmap,
+        "buildfiles_configmap": buildfiles_configmap,
+        "flatcar_image_digest": flatcar_image_digest or "",
+        "git_revision": git_revision,
+    }
+    spec_hash = hashlib.sha256(str(template_inputs).encode()).hexdigest()[:8]
     inputs_str = key.driver + key.flatcar + str(key.precompile) + spec_hash
     inputs_hash = hashlib.sha256(inputs_str.encode()).hexdigest()
     job_name = build_job_name(key, inputs_hash)

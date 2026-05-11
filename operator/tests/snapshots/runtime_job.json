@@ -10,7 +10,7 @@
       "vgpu.flatcar.io/mode": "runtime",
       "vgpu.flatcar.io/owner-uid": "abc-123-uid"
     },
-    "name": "vgpu-build-runtime-550-54-15-fc-4230-2-3-5e8fad",
+    "name": "vgpu-build-runtime-550-54-15-fc-4230-2-3-80a969",
     "namespace": "vgpu-system",
     "ownerReferences": [
       {
