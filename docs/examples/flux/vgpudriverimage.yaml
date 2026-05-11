@@ -30,9 +30,7 @@ spec:
   registry:
     repository: "registry.example.com/vgpu-driver"
     cacheRepository: "registry.example.com/vgpu-driver-cache"
-    # Uncomment if your registry requires auth. Otherwise the chart-level
-    # private-registry-secret stub (see secrets.example.yaml) covers the
-    # operator's default-name fallback (Bug 6/8 — see TODO.md).
+    # Uncomment if your registry requires auth.
     # authSecretRef:
     #   name: private-registry-secret
 

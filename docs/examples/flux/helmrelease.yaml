@@ -44,12 +44,12 @@ spec:
       create: false
       secretName: s3-driver-storage-secret
 
-    # Bug 6/8: the operator defaults to this name even when the CR omits
-    # authSecretRef. Provide a stub Secret (see secrets.example.yaml) until
-    # the default is removed.
+    # Optional: set this only when using registry.create=true to create a
+    # dockerconfig Secret from Helm values. CRs must still opt into auth via
+    # spec.registry.authSecretRef.
     registry:
       create: false
-      secretName: private-registry-secret
+      secretName: ""
 
     # Flatcar release-feed poller: keeps a ConfigMap of stable/lts versions
     # current. Disable if the cluster has no internet egress to flatcar.org.

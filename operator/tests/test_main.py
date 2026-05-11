@@ -116,6 +116,37 @@ def test_reconcile_pending_build_emits_normal_event(monkeypatch):
     assert event_mock.call_args.kwargs["reason"] == "Reconciled"
 
 
+def test_reconcile_ignores_registry_secret_env_without_cr_auth_ref(monkeypatch):
+    patch = SimpleNamespace(status={})
+    batch_api = MagicMock()
+
+    monkeypatch.setenv("REGISTRY_SECRET_NAME", "private-registry-secret")
+    monkeypatch.setattr(_main, "_load_k8s_config", lambda: None)
+    monkeypatch.setattr(_main._crd, "operator_namespace", lambda: "vgpu-driver-operator")
+    monkeypatch.setattr(_main.client, "CoreV1Api", lambda: MagicMock())
+    monkeypatch.setattr(_main.client, "BatchV1Api", lambda: batch_api)
+    monkeypatch.setattr(_main.client, "CustomObjectsApi", lambda: MagicMock())
+    monkeypatch.setattr(_main._crd, "list_owned_jobs", MagicMock(return_value=[]))
+    monkeypatch.setattr(_main._registry, "list_tags", MagicMock(return_value=set()))
+    monkeypatch.setattr(_main.kopf, "event", MagicMock())
+
+    _main._do_reconcile(
+        spec=_base_spec(),
+        name="my-vdi",
+        status={},
+        patch=patch,  # type: ignore[arg-type]
+        body={"metadata": {"uid": "uid-1", "generation": 3}},  # type: ignore[arg-type]
+        logger=MagicMock(),
+    )
+
+    manifest = batch_api.create_namespaced_job.call_args.args[1]
+    pod_spec = manifest["spec"]["template"]["spec"]
+    assert "docker-config" not in [v["name"] for v in pod_spec["volumes"]]
+    assert "docker-config" not in [
+        m["name"] for m in pod_spec["containers"][0]["volumeMounts"]
+    ]
+
+
 def test_on_job_event_logs_terminal_transition(monkeypatch):
     logger = MagicMock()
     custom_api = MagicMock()

@@ -90,14 +90,9 @@ chart:
 
 ## Workarounds still required
 
-See `TODO.md` for the canonical list of outstanding bugs. The two that affect
+See `TODO.md` for the canonical list of outstanding bugs. The one that affects
 this deployment manifest set:
 
-- **Bug 6/8**: the operator falls back to `private-registry-secret` as the
-  default registry-auth Secret name even when `spec.registry.authSecretRef` is
-  absent. The build-pod mount is conditional on the *name* being None, but
-  the caller passes the default unconditionally — so the Secret must exist.
-  `secrets.example.yaml` ships a stub with `{"auths":{}}` to satisfy the mount.
 - **Bug 9**: the CR `spec.source.uriTemplate` placeholder syntax must be
   `${DRIVER_VERSION}`, not `{driverVersion}`. Other placeholders
   (`{flatcarVersion}`, `{arch}`) are honored as-is.
