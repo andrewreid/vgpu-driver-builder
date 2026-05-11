@@ -58,6 +58,8 @@ _extract_userspace() {
     cd "NVIDIA-Linux-${DRIVER_ARCH}-${DRIVER_VERSION}-grid"
     ./nvidia-installer --silent \
         --no-kernel-module \
+        --no-systemd \
+        --no-opengl-files \
         --no-nouveau-check \
         --no-nvidia-modprobe \
         --no-rpms \
@@ -71,7 +73,8 @@ _extract_userspace() {
         --x-sysconfig-path=/tmp/null
 
     mkdir -p "/usr/src/nvidia-${DRIVER_VERSION}"
-    mv LICENSE kernel "/usr/src/nvidia-${DRIVER_VERSION}"
+    cp LICENSE "/usr/src/nvidia-${DRIVER_VERSION}"
+    mv kernel "/usr/src/nvidia-${DRIVER_VERSION}"
     # shellcheck disable=SC2016
     # Reason: literal sed expression; $ is sed range, not shell expansion.
     sed '9,${/^\(kernel\|LICENSE\)/!d}' .manifest > "/usr/src/nvidia-${DRIVER_VERSION}/.manifest"
@@ -125,7 +128,7 @@ _prepare_kernel_env() {
         cp -a "${kernel_dir}" "/lib/modules/${KERNEL_VERSION}"
     fi
 
-    local kernel_tree="/lib/modules/${KERNEL_VERSION}"
+    local kernel_tree="${KERNEL_MODULES_ROOT:-/lib/modules}/${KERNEL_VERSION}"
     local kernel_build_real=""
     local kernel_source_real=""
     if [ -e "${kernel_tree}/build" ]; then
@@ -278,6 +281,60 @@ _validate_precompiled_modules() {
     done
 }
 
+_copy_kernel_module_closure() {
+    local rel_path="$1"
+    local install_dir="$2"
+    local kernel_tree="${KERNEL_MODULES_ROOT:-/lib/modules}/${KERNEL_VERSION}"
+    local modules_dep="${kernel_tree}/modules.dep"
+    local line item
+
+    [ -n "${rel_path}" ] || return 0
+    if [ -f "${install_dir}/${rel_path}" ]; then
+        return 0
+    fi
+    if [ ! -f "${kernel_tree}/${rel_path}" ]; then
+        _log WARN "Kernel dependency ${kernel_tree}/${rel_path} is missing"
+        return 0
+    fi
+
+    mkdir -p "${install_dir}/$(dirname "${rel_path}")"
+    cp "${kernel_tree}/${rel_path}" "${install_dir}/${rel_path}"
+    line=$(grep -F "${rel_path}:" "${modules_dep}" 2>/dev/null || true)
+    for item in ${line#*:}; do
+        [ -n "${item}" ] || continue
+        _copy_kernel_module_closure "${item}" "${install_dir}"
+    done
+}
+
+_stage_kernel_symbol_dependencies() {
+    local install_dir="$1"
+    local kernel_tree="${KERNEL_MODULES_ROOT:-/lib/modules}/${KERNEL_VERSION}"
+    local modules_symbols="${kernel_tree}/modules.symbols"
+    local module_file symbol provider module_path rel_path
+
+    if [ ! -f "${modules_symbols}" ]; then
+        _log WARN "Cannot stage kernel symbol dependencies: ${modules_symbols} is missing"
+        return 0
+    fi
+
+    for module_file in "${install_dir}"/nvidia*.ko; do
+        [ -f "${module_file}" ] || continue
+        while read -r symbol; do
+            [ -n "${symbol}" ] || continue
+            provider=$(awk -v sym="${symbol}" '$1 == "alias" && $2 == "symbol:" sym { print $3; exit }' "${modules_symbols}")
+            [ -n "${provider}" ] || continue
+            module_path=$(modinfo -k "${KERNEL_VERSION}" -n "${provider}" 2>/dev/null || true)
+            [ -n "${module_path}" ] || continue
+            rel_path=${module_path#"${kernel_tree}/"}
+            if [ "${rel_path}" = "${module_path}" ]; then
+                _log WARN "Kernel symbol provider ${provider} for ${symbol} is outside ${kernel_tree}"
+                continue
+            fi
+            _copy_kernel_module_closure "${rel_path}" "${install_dir}"
+        done < <(nm -u "${module_file}" 2>/dev/null | awk '{print $NF}' | sort -u)
+    done
+}
+
 _sync_modules_to_host() {
     local src_dir="$1"
     if [ ! -d "${src_dir}" ]; then
@@ -364,6 +421,7 @@ _build_and_install_modules() {
     if [ -f "/lib/modules/${KERNEL_VERSION}/modules.builtin" ]; then
         cp "/lib/modules/${KERNEL_VERSION}/modules.builtin" "${install_dir}/"
     fi
+    _stage_kernel_symbol_dependencies "${install_dir}"
     depmod -b "${NVIDIA_KMODS_DIR}" "${KERNEL_VERSION}"
     _validate_precompiled_modules "${install_dir}"
     cd /

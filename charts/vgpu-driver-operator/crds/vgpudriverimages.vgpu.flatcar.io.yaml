@@ -87,7 +87,7 @@ spec:
                       description: OCI repository for precompiled (pre-built) driver images.
                       type: string
                     cacheRepository:
-                      description: OCI repository used as a BuildKit cache source/destination.
+                      description: OCI repository used as a BuildKit cache source.
                       type: string
                     authSecretRef:
                       description: Reference to a docker-config Secret for registry authentication.

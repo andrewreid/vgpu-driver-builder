@@ -29,7 +29,8 @@ spec:
 
   registry:
     repository: "registry.example.com/vgpu-driver"
-    cacheRepository: "registry.example.com/vgpu-driver-cache"
+    # Optional import-only BuildKit cache source.
+    # cacheRepository: "registry.example.com/vgpu-driver-cache"
     # Uncomment if your registry requires auth.
     # authSecretRef:
     #   name: private-registry-secret

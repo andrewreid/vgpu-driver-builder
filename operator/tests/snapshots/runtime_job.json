@@ -42,7 +42,7 @@
             "command": [
               "/bin/sh",
               "-c",
-              "if [ -f /kaniko/.docker/config.json ]; then\n  export DOCKER_CONFIG=/kaniko/.docker\nfi\nexport BUILDKITD_FLAGS=\"--oci-worker-no-process-sandbox\"\nbuildctl-daemonless.sh build \\\n  --progress=plain \\\n  --frontend=dockerfile.v0 \\\n  --local context=/workspace \\\n  --local dockerfile=/workspace \\\n  --import-cache type=registry,ref=registry.example.com/cache/vgpu-driver:shared \\\n  --export-cache type=registry,ref=registry.example.com/cache/vgpu-driver:shared,mode=max \\\n  --opt build-arg:FLATCAR_VERSION=4230.2.3 \\\n  --opt build-arg:DRIVER_VERSION=550.54.15 \\\n  --opt build-arg:GIT_REVISION=deadbeef \\\n  --opt build-arg:BUILD_CREATED=2025-01-10T12:00:00Z \\\n  --output type=image,name=registry.example.com/vgpu-driver:550.54.15-flatcar4230.2.3,push=true"
+              "if [ -f /kaniko/.docker/config.json ]; then\n  export DOCKER_CONFIG=/kaniko/.docker\nfi\nexport BUILDKITD_FLAGS=\"--oci-worker-no-process-sandbox\"\nbuildctl-daemonless.sh build \\\n  --progress=plain \\\n  --frontend=dockerfile.v0 \\\n  --local context=/workspace \\\n  --local dockerfile=/workspace \\\n  --import-cache type=registry,ref=registry.example.com/cache/vgpu-driver:shared \\\n  --opt build-arg:FLATCAR_VERSION=4230.2.3 \\\n  --opt build-arg:DRIVER_VERSION=550.54.15 \\\n  --opt build-arg:GIT_REVISION=deadbeef \\\n  --opt build-arg:BUILD_CREATED=2025-01-10T12:00:00Z \\\n  --output type=image,name=registry.example.com/vgpu-driver:550.54.15-flatcar4230.2.3,push=true"
             ],
             "image": "moby/buildkit:rootless",
             "name": "buildkit",
