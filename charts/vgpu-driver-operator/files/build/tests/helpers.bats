@@ -104,6 +104,44 @@ EOF
         | grep -qx aarch64
 }
 
+@test "_csv_to_json_string_array emits empty string item by default" {
+    run _csv_to_json_string_array ""
+    [ "$status" -eq 0 ]
+    [ "$output" = '[""]' ]
+}
+
+@test "_csv_to_json_string_array trims comma-separated GPU IDs" {
+    run _csv_to_json_string_array " 10de:1eb8 , 10de:1bb3 "
+    [ "$status" -eq 0 ]
+    [ "$output" = '["10de:1eb8","10de:1bb3"]' ]
+}
+
+@test "_write_nvlts_config writes expected local trusted store config" {
+    export NVLTS_PRODUCT_NAME="NVIDIA RTX Virtual Workstation"
+    export NVLTS_FEATURE_NAME="Quadro-Virtual-DWS"
+    export NVLTS_FEATURE_VERSION="5.0"
+    export NVLTS_GUEST_DRIVER_VERSION="580.159.03"
+    export NVLTS_HOST_DRIVER_VERSION="580.159.01"
+    export NVLTS_GPU_ID_LIST="10de:1eb8"
+    local config_file="${BATS_TEST_TMPDIR}/nvlts-config.json"
+
+    run _write_nvlts_config "${config_file}"
+    [ "$status" -eq 0 ]
+    grep -q '"GuestDriverVersion": "580.159.03"' "${config_file}"
+    grep -q '"HostDriverVersion": "580.159.01"' "${config_file}"
+    grep -q '"ProductName": "NVIDIA RTX Virtual Workstation"' "${config_file}"
+    grep -q '"FeatureName": "Quadro-Virtual-DWS"' "${config_file}"
+    grep -q '"FeatureVersion": "5.0"' "${config_file}"
+    grep -q '"GPU": \["10de:1eb8"\]' "${config_file}"
+}
+
+@test "_configure_nvlts fails clearly when enabled but binary missing" {
+    export VGPU_LOCAL_TRUSTED_STORE_ENABLED=true
+    run _configure_nvlts
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"VGPU_LOCAL_TRUSTED_STORE_ENABLED=true but nvlts binary is missing"* ]]
+}
+
 @test "_validate_precompiled_modules accepts valid module metadata" {
     export KERNEL_VERSION=6.12.81-flatcar
     local install_dir="${BATS_TEST_TMPDIR}/mods"

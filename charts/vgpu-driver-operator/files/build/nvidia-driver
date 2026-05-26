@@ -34,9 +34,80 @@ fi
 DRIVER_TYPE=${DRIVER_TYPE:-vgpu}
 VGPU_LICENSE_SERVER_TYPE=${VGPU_LICENSE_SERVER_TYPE:-NLS}
 NVIDIA_PRECOMPILED_IMAGE=${NVIDIA_PRECOMPILED_IMAGE:-false}
+VGPU_LOCAL_TRUSTED_STORE_ENABLED=${VGPU_LOCAL_TRUSTED_STORE_ENABLED:-false}
 
 # Ensure sbin paths are on PATH for modprobe/depmod/losetup.
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}
+
+_csv_to_json_string_array() {
+    local input="${1:-}"
+    local first=1
+    local item
+
+    printf '['
+    IFS=',' read -r -a items <<< "${input}"
+    for item in "${items[@]}"; do
+        item="${item#"${item%%[![:space:]]*}"}"
+        item="${item%"${item##*[![:space:]]}"}"
+        if [ "${first}" -eq 0 ]; then
+            printf ','
+        fi
+        printf '"%s"' "${item}"
+        first=0
+    done
+    if [ "${first}" -eq 1 ]; then
+        printf '""'
+    fi
+    printf ']'
+}
+
+_write_nvlts_config() {
+    local config_file="$1"
+    local gpu_list
+
+    : "${NVLTS_PRODUCT_NAME:?NVLTS_PRODUCT_NAME env var required when VGPU_LOCAL_TRUSTED_STORE_ENABLED=true}"
+    : "${NVLTS_FEATURE_NAME:?NVLTS_FEATURE_NAME env var required when VGPU_LOCAL_TRUSTED_STORE_ENABLED=true}"
+    : "${NVLTS_FEATURE_VERSION:?NVLTS_FEATURE_VERSION env var required when VGPU_LOCAL_TRUSTED_STORE_ENABLED=true}"
+
+    gpu_list=$(_csv_to_json_string_array "${NVLTS_GPU_ID_LIST:-}")
+    cat > "${config_file}" <<EOF
+{
+  "GuestDriverVersion": "${NVLTS_GUEST_DRIVER_VERSION:-${DRIVER_VERSION}}",
+  "HostDriverVersion": "${NVLTS_HOST_DRIVER_VERSION:-${DRIVER_VERSION}}",
+  "ProductName": "${NVLTS_PRODUCT_NAME}",
+  "FeatureName": "${NVLTS_FEATURE_NAME}",
+  "FeatureVersion": "${NVLTS_FEATURE_VERSION}",
+  "GPU": ${gpu_list}
+}
+EOF
+}
+
+_configure_nvlts() {
+    case "${VGPU_LOCAL_TRUSTED_STORE_ENABLED}" in
+        true|TRUE|1|yes|YES) ;;
+        *) return 0 ;;
+    esac
+
+    if ! command -v nvlts >/dev/null 2>&1; then
+        _log ERROR "VGPU_LOCAL_TRUSTED_STORE_ENABLED=true but nvlts binary is missing"
+        return 1
+    fi
+
+    local config_file="/etc/nvidia/nvlts-config.json"
+    _log INFO "Generating NVIDIA local trusted store with nvlts"
+    mkdir -p /etc/nvidia /etc/nvidia/vGPULicense /var/lib/nvidia/vGPULicensing
+    chmod 0755 /etc/nvidia/vGPULicense /var/lib/nvidia/vGPULicensing
+    _write_nvlts_config "${config_file}"
+
+    nvlts -c "${config_file}" -g
+
+    if [ ! -s /var/lib/nvidia/vGPULicensing/DataStore.bin ] ||
+       [ ! -s /var/lib/nvidia/vGPULicensing/NGUgNGMgNTMgMzEgMmUgMzA ] ||
+       [ ! -e /etc/nvidia/vGPULicense/nvlts.lic ]; then
+        _log ERROR "nvlts did not generate expected licensing artifacts"
+        return 1
+    fi
+}
 
 # _extract_userspace: extract NVIDIA .run installer and stage userspace + sources.
 # Idempotent: no-op if /usr/src/nvidia-${DRIVER_VERSION}/kernel already exists.
@@ -192,6 +263,7 @@ _load_driver() {
             mkdir -p /etc/nvidia/ClientConfigToken/
             cp /drivers/ClientConfigToken/* /etc/nvidia/ClientConfigToken/
         fi
+        _configure_nvlts
         _log INFO "Starting nvidia-gridd"
         # gridd backgrounds itself; failure to launch is non-fatal here because
         # the daemon may already be active. License renewal runs separately.
