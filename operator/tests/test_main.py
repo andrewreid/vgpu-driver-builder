@@ -21,9 +21,13 @@ def _base_spec() -> dict:
     }
 
 
-def test_kopf_login_delegates_to_client_login(monkeypatch):
-    connection = object()
-    login_via_client = MagicMock(return_value=connection)
+def test_kopf_login_prefers_service_account(monkeypatch):
+    connection = SimpleNamespace(token="secret-token")
+    login_with_service_account = MagicMock(return_value=connection)
+    login_via_client = MagicMock()
+    monkeypatch.setattr(
+        _main.kopf, "login_with_service_account", login_with_service_account
+    )
     monkeypatch.setattr(_main.kopf, "login_via_client", login_via_client)
 
     logger = MagicMock()
@@ -35,7 +39,42 @@ def test_kopf_login_delegates_to_client_login(monkeypatch):
     )
 
     assert result is connection
-    logger.debug.assert_called_once_with("Delegating Kopf login to kubernetes client")
+    logger.debug.assert_called_once_with("Using service account credentials for Kopf login")
+    assert "secret-token" not in str(logger.debug.call_args)
+    login_with_service_account.assert_called_once_with(
+        logger=logger,
+        settings=settings,
+        extra="passed-through",
+    )
+    login_via_client.assert_not_called()
+
+
+def test_kopf_login_falls_back_to_client_login(monkeypatch):
+    connection = object()
+    login_with_service_account = MagicMock(return_value=None)
+    login_via_client = MagicMock(return_value=connection)
+    monkeypatch.setattr(
+        _main.kopf, "login_with_service_account", login_with_service_account
+    )
+    monkeypatch.setattr(_main.kopf, "login_via_client", login_via_client)
+
+    logger = MagicMock()
+    settings = MagicMock()
+    result = _main.login_via_kubernetes_client(
+        logger=logger,
+        settings=settings,
+        extra="passed-through",
+    )
+
+    assert result is connection
+    logger.debug.assert_called_once_with(
+        "Service account credentials unavailable; delegating Kopf login to client"
+    )
+    login_with_service_account.assert_called_once_with(
+        logger=logger,
+        settings=settings,
+        extra="passed-through",
+    )
     login_via_client.assert_called_once_with(
         logger=logger,
         settings=settings,

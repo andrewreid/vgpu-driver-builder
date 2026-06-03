@@ -50,10 +50,16 @@ def configure(settings: kopf.OperatorSettings, **_: Any) -> None:
 
 
 @kopf.on.login()
-def login_via_kubernetes_client(**kwargs: Any) -> kopf.ConnectionInfo:
+def login_via_kubernetes_client(**kwargs: Any) -> kopf.ConnectionInfo | None:
     logger = kwargs.get("logger")
+    connection = kopf.login_with_service_account(**kwargs)
+    if connection is not None:
+        if hasattr(logger, "debug"):
+            logger.debug("Using service account credentials for Kopf login")
+        return connection
+
     if hasattr(logger, "debug"):
-        logger.debug("Delegating Kopf login to kubernetes client")
+        logger.debug("Service account credentials unavailable; delegating Kopf login to client")
     return kopf.login_via_client(**kwargs)
 
 
