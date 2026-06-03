@@ -1,0 +1,117 @@
+{{- if .Values.flatcar.archiveStaleFailedPollJobs.enabled -}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "vgpu-driver-operator.archiveStalePollerHookName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "vgpu-driver-operator.labels" . | nindent 4 }}
+    app.kubernetes.io/component: flatcar-poller-archive
+  annotations:
+    "helm.sh/hook": pre-upgrade
+    "helm.sh/hook-weight": "-30"
+    "helm.sh/hook-delete-policy": before-hook-creation
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "vgpu-driver-operator.archiveStalePollerHookName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "vgpu-driver-operator.labels" . | nindent 4 }}
+    app.kubernetes.io/component: flatcar-poller-archive
+  annotations:
+    "helm.sh/hook": pre-upgrade
+    "helm.sh/hook-weight": "-20"
+    "helm.sh/hook-delete-policy": before-hook-creation
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "patch", "update"]
+  - apiGroups: ["batch"]
+    resources: ["jobs/status"]
+    verbs: ["get", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "vgpu-driver-operator.archiveStalePollerHookName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "vgpu-driver-operator.labels" . | nindent 4 }}
+    app.kubernetes.io/component: flatcar-poller-archive
+  annotations:
+    "helm.sh/hook": pre-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "vgpu-driver-operator.archiveStalePollerHookName" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "vgpu-driver-operator.archiveStalePollerHookName" . }}
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "vgpu-driver-operator.archiveStalePollerHookName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "vgpu-driver-operator.labels" . | nindent 4 }}
+    app.kubernetes.io/component: flatcar-poller-archive
+  annotations:
+    "helm.sh/hook": pre-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 1
+  ttlSecondsAfterFinished: 300
+  template:
+    metadata:
+      labels:
+        {{- include "vgpu-driver-operator.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: flatcar-poller-archive
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "vgpu-driver-operator.archiveStalePollerHookName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      restartPolicy: Never
+      containers:
+        - name: archive-stale-poller-jobs
+          image: {{ include "vgpu-driver-operator.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - python
+            - -m
+            - vgpu_driver_operator.stale_poller_archive
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: RELEASE_NAME
+              value: {{ .Release.Name | quote }}
+            - name: POLLER_JOB_NAME_PREFIX
+              value: {{ printf "%s-flatcar-poll-" (include "vgpu-driver-operator.fullname" .) | quote }}
+            - name: NEW_POLLER_IMAGE
+              value: {{ include "vgpu-driver-operator.image" . | quote }}
+            - name: CLEANUP_CHART_VERSION
+              value: {{ .Chart.Version | quote }}
+            - name: CLEANUP_APP_VERSION
+              value: {{ .Chart.AppVersion | quote }}
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+{{- end }}

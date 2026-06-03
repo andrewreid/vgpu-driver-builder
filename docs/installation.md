@@ -232,6 +232,17 @@ readOnlyRootFilesystem: true
 |-----|------|---------|-------------|
 | `flatcar.pollSchedule` | string | `@hourly` | Cron schedule for polling Flatcar release feeds. |
 | `flatcar.pollEnabled` | bool | `true` | Enable/disable Flatcar poller CronJob. |
+| `flatcar.archiveStaleFailedPollJobs.enabled` | bool | `true` | Archive stale failed Flatcar poller Jobs from older images during Helm upgrades. |
+
+`flatcar.archiveStaleFailedPollJobs.enabled` is default-on to clean up stale
+failed Flatcar poller Jobs during chart upgrades. The hook suspends matching
+old failed Jobs, marks them as archived, and clears their failed status so
+retained Kubernetes Job history no longer carries the old failure forward. You
+should leave it enabled for the first fixed-chart upgrade, then set
+`flatcar.archiveStaleFailedPollJobs.enabled=false` after the affected stale
+failed poller history has been archived to avoid future no-op hook/RBAC
+resources. Disabling this value only suppresses the archive hook; it does not
+disable the Flatcar poller CronJob.
 
 ### S3 secret (development)
 

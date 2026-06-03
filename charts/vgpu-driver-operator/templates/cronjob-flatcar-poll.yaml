@@ -13,6 +13,10 @@ spec:
   successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 3
   jobTemplate:
+    metadata:
+      labels:
+        {{- include "vgpu-driver-operator.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: flatcar-poller
     spec:
       template:
         metadata:

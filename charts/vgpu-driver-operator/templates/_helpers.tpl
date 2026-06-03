@@ -62,6 +62,13 @@ Return the ServiceAccount name the operator should use.
 {{- end }}
 
 {{/*
+Name for the stale poller Job archive hook resources.
+*/}}
+{{- define "vgpu-driver-operator.archiveStalePollerHookName" -}}
+{{- printf "%s-archive-poller" (include "vgpu-driver-operator.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{/*
 Return the operator image reference (repo:tag, falling back to appVersion).
 */}}
 {{- define "vgpu-driver-operator.image" -}}

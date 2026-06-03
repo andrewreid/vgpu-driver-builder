@@ -63,6 +63,10 @@ flatcar:
   pollSchedule: "@hourly"
   # -- Enable or disable the Flatcar poller CronJob
   pollEnabled: true
+  archiveStaleFailedPollJobs:
+    # -- Archive stale failed Flatcar poller Jobs from older images during Helm upgrades.
+    # Runs on every upgrade while enabled; disable after affected stale history is archived.
+    enabled: true
 
 # -- Optional inline S3 secret creation (production should use external-secrets)
 s3:
