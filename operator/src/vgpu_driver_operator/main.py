@@ -49,6 +49,14 @@ def configure(settings: kopf.OperatorSettings, **_: Any) -> None:
     settings.posting.level = logging.INFO
 
 
+@kopf.on.login()
+def login_via_kubernetes_client(**kwargs: Any) -> kopf.ConnectionInfo:
+    logger = kwargs.get("logger")
+    if hasattr(logger, "debug"):
+        logger.debug("Delegating Kopf login to kubernetes client")
+    return kopf.login_via_client(**kwargs)
+
+
 # ---------------------------------------------------------------------------
 # Reconcile handler (create + update)
 # ---------------------------------------------------------------------------

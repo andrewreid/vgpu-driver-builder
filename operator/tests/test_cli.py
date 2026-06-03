@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+import builtins
+from unittest.mock import patch
 
 import pytest
 
@@ -75,4 +76,30 @@ class TestCliMain:
             mock_kopf_run.return_value = None
             rc = cli._run_controller()
         assert rc == 0
+        mock_kopf_run.assert_called_once_with(standalone=True)
+
+    def test_run_controller_imports_main_before_kopf_run(self, monkeypatch):
+        events: list[str] = []
+        real_import = builtins.__import__
+
+        def recording_import(
+            name: str,
+            globals: dict | None = None,
+            locals: dict | None = None,
+            fromlist: tuple[str, ...] = (),
+            level: int = 0,
+        ):
+            if name == "vgpu_driver_operator.main":
+                events.append("main_import")
+            return real_import(name, globals, locals, fromlist, level)
+
+        def fake_kopf_run(**_: object) -> None:
+            events.append("kopf_run")
+
+        monkeypatch.setattr(builtins, "__import__", recording_import)
+        with patch("kopf.run", side_effect=fake_kopf_run) as mock_kopf_run:
+            rc = cli._run_controller()
+
+        assert rc == 0
+        assert events == ["main_import", "kopf_run"]
         mock_kopf_run.assert_called_once_with(standalone=True)
