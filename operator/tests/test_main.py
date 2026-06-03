@@ -21,6 +21,28 @@ def _base_spec() -> dict:
     }
 
 
+def test_kopf_login_delegates_to_client_login(monkeypatch):
+    connection = object()
+    login_via_client = MagicMock(return_value=connection)
+    monkeypatch.setattr(_main.kopf, "login_via_client", login_via_client)
+
+    logger = MagicMock()
+    settings = MagicMock()
+    result = _main.login_via_kubernetes_client(
+        logger=logger,
+        settings=settings,
+        extra="passed-through",
+    )
+
+    assert result is connection
+    logger.debug.assert_called_once_with("Delegating Kopf login to kubernetes client")
+    login_via_client.assert_called_once_with(
+        logger=logger,
+        settings=settings,
+        extra="passed-through",
+    )
+
+
 def test_reconcile_registry_unreachable_sets_condition(monkeypatch):
     monkeypatch.setattr(_main, "_load_k8s_config", lambda: None)
     monkeypatch.setattr(_main._crd, "operator_namespace", lambda: "vgpu-driver-operator")
