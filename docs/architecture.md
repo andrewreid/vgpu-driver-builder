@@ -153,19 +153,67 @@ Also compile kernel modules during the build, baking them into the image.
 
 ### Garbage collection
 
-When `retention.enabled: true`:
+When `retention.enabled: true`, `gc.py` runs during reconciliation, including
+when the registry deliberately has no `authSecretRef`.
 
-1. **Identify retained Flatcar versions**:
-   - All versions currently running on cluster nodes
-   - All versions from tracked channel feeds
-   - (Optional) N previous historical versions per the `keepPreviousFlatcarVersions` policy
+1. **Identify retained Flatcar versions**: all observed node versions, tracked
+   channel versions, and explicit `spec.flatcar.versions` pins. Also retain the
+   N newest available historical versions below the highest observed node
+   version, according to `keepPreviousFlatcarVersions`. CRD-valid suffixes are
+   supported: stable releases sort after suffixed versions with the same numeric
+   core; dot-separated suffix identifiers sort numerically when numeric and
+   lexically otherwise, with numeric identifiers first. With no observed nodes,
+   only tracked and pinned versions are required; there is no rollback baseline.
+2. **Inventory image repositories**: inspect runtime and precompiled tags,
+   aliases, and nested index references. `repositoryPrecompiled` falls back to
+   `repository`; a shared repository is inventoried once per inspection pass.
+   Cache repositories are excluded. Historical versions come from existing
+   images, not deletion history.
+3. **Select old images**: a recognized tag is eligible only if its Flatcar
+   version is not retained and its image creation age is at least
+   `minAgeBeforeDelete` (default `168h`). The registry API does not supply a
+   portable push timestamp. Index age uses the newest runnable child creation
+   time; explicitly marked attestations are excluded from age calculation.
+   Unknown, malformed, timezone-less, and future timestamps are protected.
+4. **Delete safe digests**: every alias must qualify, and no preserved image or
+   index may reference the digest. Revalidate all inventories before deletion.
+   Delete each selected digest once, never recursively delete children or blobs,
+   and record affected tags in `.status.pruned[]` (last 100 entries).
 
-2. **Find prunable tags** (all must be true):
-   - Image's Flatcar version is NOT in retained set
-   - Image's push timestamp is known
-   - Image age ≥ `minAgeBeforeDelete` (default 168h = 7 days)
+Failed configured authentication never falls back to anonymous deletion. Failed
+node discovery, missing required versions, incomplete registry inventories,
+dangling references, and changed inventories block deletion. A deletion failure
+stops the attempt and preserves the record of earlier successful deletions.
 
-3. **Delete** and record in `.status.pruned[]`
+`.status.retention` records the latest evaluation result/reason, last actual
+attempt and successful attempt timestamps, and candidate/deleted/skipped tag
+counts. Skipped counts describe tags excluded by policy or digest protection;
+candidate counts are age/version-eligible tags before digest protection.
+`RetentionHealthy` reports retention independently of build readiness. Disabled
+retention is healthy but recorded as skipped. Registry-unreachable errors also
+continue to set `Reconciled=False`.
+
+Retention assumes operator-managed image repositories and stable tags during
+cleanup. Revalidation is not atomic with deletion: external writers must not
+retag manifests during cleanup. External digest-only consumers are not
+observable through tag inventory; protect their images with a non-prunable tag
+or disable automatic retention for that repository.
+
+### Registry storage reclamation
+
+Deleting a manifest through the registry API makes its unreferenced storage
+eligible for reclamation; it does not itself reclaim layer bytes. The operator
+does not run backend GC or remove overwritten, untagged cache history. Current
+builds import from `cacheRepository:shared` only; cache export remains disabled,
+so they do not add exported cache revisions.
+
+For Distribution maintenance, coordinate all writers, put the registry into
+read-only mode (or stop it), and run `registry garbage-collect --dry-run` with
+its actual configuration before an approved sweep. Review retained digest-only
+consumers and index children; do not blindly enable `--delete-untagged` on a
+shared registry. Keep maintenance logs and compare storage use and protected
+image pullability before and after. See the
+[Distribution GC documentation](https://distribution.github.io/distribution/about/garbage-collection/).
 
 ## Why separate runtime and precompiled modes?
 

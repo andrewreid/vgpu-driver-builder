@@ -325,8 +325,8 @@ See the [VGPUDriverImage CRD definition](../charts/vgpu-driver-operator/crds/vgp
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `retention.enabled` | bool | `false` | Enable automatic GC. |
-| `retention.keepPreviousFlatcarVersions` | int | `0` | Number of previous Flatcar versions to keep (per driver). |
-| `retention.minAgeBeforeDelete` | string | `168h` | Go duration; minimum age before a tag is eligible for deletion. |
+| `retention.keepPreviousFlatcarVersions` | int | `0` | Number of available historical versions below the highest observed node version to keep. |
+| `retention.minAgeBeforeDelete` | string | `168h` | Image creation age; number with d/h/m/s suffix (or seconds without a suffix). |
 
 ### VGPUDriverImage status
 
@@ -338,6 +338,7 @@ The operator updates `.status` with reconciliation results:
 | `trackedChannelVersions` | object[] | Latest releases per tracked channel. Each entry: `{channel, flatcarVersion, kernelVersion, observedAt}`. |
 | `builds` | object[] | Per-combination build results. Each entry: `{driverVersion, flatcarVersion, kernelVersion?, mode, tag, phase, jobName, lastTransitionTime, message}`. |
 | `conditions` | object[] | Standard Kubernetes conditions. Examples: `Reconciled`, `BuildsComplete`, `GCComplete`. |
+| `retention` | object | Latest retention result/reason, attempt/success timestamps, and candidate/deleted/skipped tag counts. See the architecture retention policy. |
 | `pruned` | object[] | Record of tags deleted by GC. Each entry: `{tag, reason, prunedAt}`. |
 
 ### Example VGPUDriverImage

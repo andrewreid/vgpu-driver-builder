@@ -18,6 +18,8 @@ from vgpu_driver_operator.registry import (
     RegistryUnreachable,
     TagDeletionDisabled,
     delete_tag,
+    inventory_repository,
+    delete_manifest,
     list_tags,
     parse_dockerconfigjson,
     tag_created_at,
@@ -906,3 +908,118 @@ class TestEdgeCases:
 
         result = _parse_link_next('</v2/tags/list?last=x>; rel="next"', HOST)
         assert result == f"https://{HOST}/v2/tags/list?last=x"
+
+
+class TestRetentionInventory:
+    base = f"https://{HOST}/v2/{PATH}"
+    image_type = "application/vnd.oci.image.manifest.v1+json"
+    index_type = "application/vnd.oci.image.index.v1+json"
+
+    def digest(self, n):
+        return "sha256:" + f"{n:064x}"
+
+    def tags(self, tags):
+        rsps_lib.add(rsps_lib.GET, self.base + "/tags/list", json={"tags": tags})
+
+    def image(self, ref, n, created="2020-01-01T00:00:00Z", config_status=200):
+        rsps_lib.add(rsps_lib.GET, self.base + "/manifests/" + ref, json={
+            "mediaType": self.image_type, "config": {"digest": self.digest(n+100)},
+        }, headers={"Docker-Content-Digest": self.digest(n)})
+        rsps_lib.add(rsps_lib.GET, self.base + "/blobs/" + self.digest(n+100),
+                     json={"created": created}, status=config_status)
+
+    def index(self, ref, n, children):
+        rsps_lib.add(rsps_lib.GET, self.base + "/manifests/" + ref, json={
+            "mediaType": self.index_type, "manifests": children,
+        }, headers={"Docker-Content-Digest": self.digest(n)})
+
+    @rsps_lib.activate
+    def test_nested_index_uses_newest_child_and_ignores_explicit_attestation_age(self):
+        self.tags(["image"])
+        self.index("image", 1, [{"digest": self.digest(2)}, {"digest": self.digest(5),
+                   "annotations": {"vnd.docker.reference.type": "attestation-manifest"}}])
+        self.index(self.digest(2), 2, [{"digest": self.digest(3)}, {"digest": self.digest(4)}])
+        self.image(self.digest(3), 3)
+        self.image(self.digest(4), 4, "2021-01-01T00:00:00Z")
+        self.image(self.digest(5), 5, None)
+        inv = inventory_repository(REPO, None)
+        assert inv.manifests[self.digest(1)].created_at == datetime(2021, 1, 1, tzinfo=timezone.utc)
+        assert len(inv.manifests) == 5
+        assert self.digest(5) in inv.manifests[self.digest(1)].children
+
+    @pytest.mark.parametrize("created", [None, "garbage", "2020-01-01T00:00:00", 42])
+    @rsps_lib.activate
+    def test_unknown_child_age_protects_index(self, created):
+        self.tags(["image"])
+        self.index("image", 1, [{"digest": self.digest(2)}, {"digest": self.digest(3)}])
+        self.image(self.digest(2), 2)
+        self.image(self.digest(3), 3, created)
+        assert inventory_repository(REPO, None).manifests[self.digest(1)].created_at is None
+
+    @pytest.mark.parametrize("status", [401, 403, 404, 500])
+    @rsps_lib.activate
+    def test_dangling_or_inaccessible_manifest_fails_inventory(self, status):
+        self.tags(["image"])
+        rsps_lib.add(rsps_lib.GET, self.base + "/manifests/image", status=status)
+        with pytest.raises(RegistryError):
+            inventory_repository(REPO, None)
+
+    @rsps_lib.activate
+    def test_missing_config_fails_inventory(self):
+        self.tags(["image"])
+        self.image("image", 1, config_status=404)
+        with pytest.raises(RegistryError):
+            inventory_repository(REPO, None)
+
+    @rsps_lib.activate
+    def test_cycle_fails_inventory(self):
+        self.tags(["image"])
+        self.index("image", 1, [{"digest": self.digest(1)}])
+        self.index(self.digest(1), 1, [{"digest": self.digest(1)}])
+        with pytest.raises(RegistryError, match="cyclic"):
+            inventory_repository(REPO, None)
+
+    @pytest.mark.parametrize("status", [202, 404, 405, 500])
+    @rsps_lib.activate
+    def test_deletion_uses_exact_digest_without_head(self, status):
+        rsps_lib.add(rsps_lib.DELETE, self.base + "/manifests/" + self.digest(1), status=status)
+        if status == 202:
+            delete_manifest(REPO, self.digest(1), None)
+        else:
+            error = TagDeletionDisabled if status == 405 else RegistryError
+            with pytest.raises(error):
+                delete_manifest(REPO, self.digest(1), None)
+        assert len(rsps_lib.calls) == 1
+        assert rsps_lib.calls[0].request.method == "DELETE"
+
+
+@pytest.mark.parametrize("link", ['nonsense', '<https://evil.example/tags>; rel="next"',
+                                  f'<https://{HOST}/v2/{PATH}/tags/list?n=1000>; rel="next"'])
+@rsps_lib.activate
+def test_incomplete_pagination_fails_closed(link):
+    rsps_lib.add(rsps_lib.GET, f"https://{HOST}/v2/{PATH}/tags/list",
+                 json={"tags": ["a"]}, headers={"Link": link})
+    with pytest.raises(RegistryError):
+        list_tags(REPO, None)
+
+
+@rsps_lib.activate
+def test_later_pagination_404_fails_closed():
+    rsps_lib.add(rsps_lib.GET, f"https://{HOST}/v2/{PATH}/tags/list?n=1000",
+                 json={"tags": ["a"]}, headers={"Link": f'</v2/{PATH}/tags/list?last=a>; rel="next"'})
+    rsps_lib.add(rsps_lib.GET, f"https://{HOST}/v2/{PATH}/tags/list?last=a", status=404)
+    with pytest.raises(RegistryError, match="pagination disappeared"):
+        list_tags(REPO, None)
+
+
+@pytest.mark.parametrize("credential", ["garbage", "dXNlcg==", "dXNlcjo=", "OnBhc3M="])
+def test_malformed_credentials_rejected(credential):
+    with pytest.raises(RegistryError):
+        parse_dockerconfigjson(_make_dockerconfigjson({HOST: {"auth": credential}}), HOST)
+
+
+@pytest.mark.parametrize("config", [[], {"auths": []}, {"auths": {HOST: []}},
+                                   {"auths": {HOST: {"username": 1, "password": 2}}}])
+def test_structurally_invalid_credentials_rejected(config):
+    with pytest.raises(RegistryError):
+        parse_dockerconfigjson(json.dumps(config), HOST)

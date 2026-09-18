@@ -15,6 +15,7 @@ from __future__ import annotations
 import base64
 import json
 import re
+from dataclasses import dataclass
 from datetime import datetime
 from typing import TypedDict
 from urllib.parse import urlparse
@@ -312,6 +313,8 @@ def parse_dockerconfigjson(blob: bytes | str, registry_host: str) -> RegistryAut
     except ValueError as exc:
         raise RegistryError(f"invalid dockerconfigjson: {exc}") from exc
 
+    if not isinstance(cfg, dict) or not isinstance(cfg.get("auths", {}), dict):
+        raise RegistryError("invalid dockerconfigjson auths object")
     auths: dict[str, dict[str, str]] = cfg.get("auths", {})
 
     def _normalise(key: str) -> str:
@@ -332,16 +335,20 @@ def parse_dockerconfigjson(blob: bytes | str, registry_host: str) -> RegistryAut
         raise RegistryError(
             f"no dockerconfigjson entry for registry {registry_host!r}"
         )
+    if not isinstance(entry, dict):
+        raise RegistryError("invalid dockerconfigjson credential entry")
 
     if "auth" in entry:
         try:
-            decoded = base64.b64decode(entry["auth"]).decode()
-            username, _, password = decoded.partition(":")
+            decoded = base64.b64decode(entry["auth"], validate=True).decode()
+            username, separator, password = decoded.partition(":")
+            if not separator or not username or not password:
+                raise ValueError("expected nonempty username:password")
         except Exception as exc:
             raise RegistryError(f"cannot decode auth field: {exc}") from exc
         return RegistryAuth(username=username, password=password)
 
-    if "username" in entry and "password" in entry:
+    if all(isinstance(entry.get(key), str) and entry[key] for key in ("username", "password")):
         return RegistryAuth(username=entry["username"], password=entry["password"])
 
     raise RegistryError(
@@ -387,11 +394,17 @@ def list_tags(
 
     url: str | None = _tags_url(host, path) + "?n=1000"
     tags: set[str] = set()
+    visited: set[str] = set()
 
     while url is not None:
+        if url in visited or urlparse(url).netloc != host or urlparse(url).scheme != "https":
+            raise RegistryError("list_tags: unsafe or repeated pagination link")
+        visited.add(url)
         resp = reg.get(url)
 
         if resp.status_code == 404:
+            if len(visited) > 1:
+                raise RegistryError("list_tags: pagination disappeared")
             return set()
 
         if not resp.ok:
@@ -404,10 +417,19 @@ def list_tags(
         except ValueError as exc:
             raise RegistryError(f"list_tags: non-JSON response: {exc}") from exc
 
-        page_tags = data.get("tags") or []
+        if not isinstance(data, dict) or "tags" not in data:
+            raise RegistryError("list_tags: missing tags in response")
+        page_tags = data.get("tags")
+        if page_tags is None:
+            page_tags = []
+        if not isinstance(page_tags, list) or any(not isinstance(t, str) for t in page_tags):
+            raise RegistryError("list_tags: invalid tags in response")
         tags.update(page_tags)
 
-        url = _parse_link_next(resp.headers.get("Link", ""), host)
+        link = resp.headers.get("Link", "")
+        url = _parse_link_next(link, host)
+        if link and url is None:
+            raise RegistryError("list_tags: unrecognised pagination link")
 
     return tags
 
@@ -501,6 +523,139 @@ def tag_created_at(
         return datetime.fromisoformat(created_str.replace("Z", "+00:00"))
     except ValueError:
         return None
+
+
+@dataclass(frozen=True)
+class ManifestInfo:
+    digest: str
+    children: tuple[str, ...]
+    created_at: datetime | None
+
+
+@dataclass(frozen=True)
+class RepositoryInventory:
+    tags: dict[str, str]
+    manifests: dict[str, ManifestInfo]
+
+
+def inventory_repository(
+    repository: str,
+    auth: RegistryAuth | None,
+    *,
+    session: requests.Session | None = None,
+) -> RepositoryInventory:
+    """Read every tagged manifest and its reference closure, or fail closed.
+
+    Content without a reliable image creation time is protected. Transport,
+    missing-reference and structural errors invalidate the entire inventory.
+    """
+    host, path = _split_repository(repository)
+    reg = _RegistrySession(auth, session)
+    manifests: dict[str, ManifestInfo] = {}
+    visiting: set[str] = set()
+
+    def get_json(url: str) -> tuple[dict, requests.Response]:
+        response = reg.get(url, headers={"Accept": _MANIFEST_ACCEPT})
+        if not response.ok:
+            raise RegistryError(f"inventory: HTTP {response.status_code} from {url}")
+        try:
+            body = response.json()
+        except ValueError as exc:
+            raise RegistryError(f"inventory: invalid JSON from {url}") from exc
+        if not isinstance(body, dict):
+            raise RegistryError(f"inventory: expected object from {url}")
+        return body, response
+
+    def inspect(ref: str) -> ManifestInfo:
+        if ref in manifests:
+            return manifests[ref]
+        body, response = get_json(_manifests_url(host, path, ref))
+        digest = response.headers.get("Docker-Content-Digest", "")
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+            raise RegistryError("inventory: missing or unsupported manifest digest")
+        if ref.startswith("sha256:") and ref != digest:
+            raise RegistryError("inventory: manifest digest mismatch")
+        if digest in visiting:
+            raise RegistryError("inventory: cyclic manifest references")
+        if digest in manifests:
+            return manifests[digest]
+        visiting.add(digest)
+        media_type = (body.get("mediaType") or response.headers.get("Content-Type", ""))
+        media_type = media_type.split(";")[0].strip()
+        children: list[str] = []
+        created: datetime | None = None
+
+        def child(descriptor: dict) -> ManifestInfo:
+            if not isinstance(descriptor, dict) or not isinstance(descriptor.get("digest"), str):
+                raise RegistryError("inventory: invalid manifest descriptor")
+            child_ref = descriptor["digest"]
+            if not re.fullmatch(r"sha256:[0-9a-f]{64}", child_ref):
+                raise RegistryError("inventory: invalid child digest")
+            info = inspect(child_ref)
+            children.append(info.digest)
+            return info
+
+        if media_type in _OCI_INDEX_MEDIA_TYPES:
+            descriptors = body.get("manifests")
+            if not isinstance(descriptors, list):
+                raise RegistryError("inventory: invalid index")
+            ages: list[datetime | None] = []
+            for descriptor in descriptors:
+                info = child(descriptor)
+                annotations = descriptor.get("annotations") or {}
+                if annotations.get("vnd.docker.reference.type") != "attestation-manifest":
+                    ages.append(info.created_at)
+            if ages and all(age is not None for age in ages):
+                created = max(age for age in ages if age is not None)
+        elif media_type in {
+            "application/vnd.oci.image.manifest.v1+json",
+            "application/vnd.docker.distribution.manifest.v2+json",
+        }:
+            config = body.get("config")
+            if not isinstance(config, dict) or not isinstance(config.get("digest"), str):
+                raise RegistryError("inventory: missing config descriptor")
+            if not re.fullmatch(r"sha256:[0-9a-f]{64}", config["digest"]):
+                raise RegistryError("inventory: invalid config digest")
+            config_body, _ = get_json(_blobs_url(host, path, config["digest"]))
+            try:
+                value = config_body.get("created")
+                created = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                if created.tzinfo is None or created.utcoffset() is None:
+                    created = None
+            except (AttributeError, ValueError, TypeError):
+                created = None
+            if body.get("artifactType"):
+                created = None
+        else:
+            # Unknown structures could conceal references to otherwise eligible images.
+            raise RegistryError(f"inventory: unsupported manifest media type {media_type!r}")
+        if body.get("subject") is not None:
+            child(body["subject"])
+        visiting.remove(digest)
+        info = ManifestInfo(digest, tuple(sorted(set(children))), created)
+        manifests[digest] = info
+        return info
+
+    tags = {tag: inspect(tag).digest for tag in sorted(list_tags(repository, auth, session=session))}
+    return RepositoryInventory(tags, manifests)
+
+
+def delete_manifest(
+    repository: str,
+    digest: str,
+    auth: RegistryAuth | None,
+    *,
+    session: requests.Session | None = None,
+) -> None:
+    """Delete exactly the digest checked by retention, without resolving a tag."""
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+        raise RegistryError("delete_manifest: invalid digest")
+    host, path = _split_repository(repository)
+    response = _RegistrySession(auth, session).delete(_manifests_url(host, path, digest))
+    if response.status_code == 405:
+        raise TagDeletionDisabled(f"manifest deletion disabled for {repository}")
+    if response.status_code != 202:
+        raise RegistryError(f"delete_manifest: unexpected HTTP {response.status_code}")
 
 
 def delete_tag(

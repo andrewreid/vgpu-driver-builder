@@ -11,25 +11,23 @@ if TYPE_CHECKING:
     pass
 
 
-# ---------------------------------------------------------------------------
-# Semver-aware comparator that handles Flatcar's MAJOR.MINOR.PATCH scheme.
-# Uses ``packaging.version.Version`` when available; falls back to a simple
-# tuple-of-ints comparator that is sufficient for the ``\d+\.\d+\.\d+`` form.
-# ---------------------------------------------------------------------------
+# Matches spec.flatcar.versions in the CRD, including non-PEP-440 suffixes.
+FLATCAR_VERSION_PATTERN = r"[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9.]+)?"
 
-try:
-    from packaging.version import Version as _Version  # type: ignore[import-untyped]
 
-    def _ver(v: str) -> object:  # type: ignore[return]
-        return _Version(v)
+def _ver(v: str) -> tuple:
+    """Order numeric releases and CRD-valid prerelease suffixes consistently.
 
-except ImportError:  # pragma: no cover
-
-    def _ver(v: str) -> tuple[int, ...]:  # type: ignore[misc]
-        try:
-            return tuple(int(x) for x in v.split("."))
-        except ValueError:
-            return (0,)
+    Stable releases sort after suffixes of the same numeric version. Within
+    suffixes, compare dot-separated numeric identifiers numerically and other
+    identifiers lexically, with numeric identifiers before textual identifiers.
+    """
+    if re.fullmatch(FLATCAR_VERSION_PATTERN, v) is None:
+        raise ValueError(f"Invalid Flatcar version: {v!r}")
+    core, separator, suffix = v.partition("-")
+    identifiers = tuple((0, int(part)) if part.isdigit() else (1, part)
+                        for part in suffix.split(".")) if separator else ()
+    return (*map(int, core.split(".")), not separator, identifiers)
 
 
 # ---------------------------------------------------------------------------
