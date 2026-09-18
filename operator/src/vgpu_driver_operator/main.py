@@ -291,7 +291,11 @@ def on_job_event(event: dict, logger: logging.Logger, **_: Any) -> None:
         }
 
         try:
-            _crd.patch_status(custom_api, crd_name, {"builds": builds, "conditions": [condition]})
+            conditions = [condition] + [
+                existing for existing in crd_status.get("conditions") or []
+                if existing.get("type") != "Reconciled"
+            ]
+            _crd.patch_status(custom_api, crd_name, {"builds": builds, "conditions": conditions})
         except Exception as exc:
             logger.warning(
                 "on_job_event: failed to patch status for %s: %s", crd_name, exc
@@ -444,6 +448,10 @@ def _do_reconcile(
     repo_runtime: str = registry_cfg.get("repository", "")
     repo_precompile: str = registry_cfg.get("repositoryPrecompiled", "")
 
+    active_repo = repo_precompile if (precompile and repo_precompile) else repo_runtime
+    auth_repositories = {active_repo} if active_repo else set()
+    if (spec.get("retention") or {}).get("enabled"):
+        auth_repositories.update(_gc.repositories(spec))
     auth_ref = registry_cfg.get("authSecretRef")
     auth_secret_name: str = (auth_ref or {}).get("name", "")
     reg_auth: _registry.RegistryAuth | None = None
@@ -457,7 +465,7 @@ def _do_reconcile(
             dockercfg = secret_data.get(".dockerconfigjson") or secret_data.get("config.json")
             if not dockercfg:
                 raise _registry.RegistryError("Registry Secret has no Docker configuration")
-        for repo in _gc.repositories(spec):
+        for repo in sorted(auth_repositories):
             auth_by_repository[repo] = (
                 _registry.parse_dockerconfigjson(dockercfg, repo.split("/")[0])
                 if dockercfg is not None else None
@@ -473,7 +481,6 @@ def _do_reconcile(
         logger.warning("reconcile: %s", message)
         return
 
-    active_repo = repo_precompile if (precompile and repo_precompile) else repo_runtime
     reg_auth = auth_by_repository.get(active_repo)
     existing_tags: set[str] = set()
     if active_repo:

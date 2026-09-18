@@ -551,3 +551,59 @@ def test_initial_anonymous_api_failure_reports_skipped_retention(retention_recon
     assert result["conditions"][1]["status"] == "False"
     read.assert_not_called()
     delete.assert_not_called()
+
+
+@pytest.mark.parametrize("precompile", [False, True])
+@pytest.mark.parametrize("retention_enabled", [False, True])
+def test_only_required_repository_credentials_are_resolved(
+    retention_reconcile, monkeypatch, precompile, retention_enabled,
+):
+    reconcile, _, read, delete = retention_reconcile
+    runtime = "registry.example.com/vgpu/drivers"
+    precompiled = "other.example.com/precompiled"
+    active = precompiled if precompile else runtime
+    host = active.split("/")[0]
+    import json
+    monkeypatch.setattr(_main._crd, "get_secret", MagicMock(return_value={"config.json":
+        json.dumps({"auths": {host: {"username": "u", "password": "p"}}}).encode()}))
+    spec = {**_base_spec(), "precompile": precompile,
+            "retention": {"enabled": retention_enabled}}
+    spec["registry"].update(repositoryPrecompiled=precompiled, authSecretRef={"name": "auth"})
+    result = reconcile(spec)
+    if retention_enabled:
+        assert result["retention"]["reason"] == "RegistryAuthFailed"
+        _main._registry.list_tags.assert_not_called()
+    else:
+        assert result["retention"]["reason"] == "Disabled"
+        assert "builds" in result
+        _main._registry.list_tags.assert_called_once_with(active, {"username": "u", "password": "p"})
+    read.assert_not_called()
+    delete.assert_not_called()
+
+
+@pytest.mark.parametrize("job_status", [{"active": 1}, {"succeeded": 1}, {"failed": 1}])
+def test_job_events_preserve_non_build_conditions(monkeypatch, job_status):
+    monkeypatch.setattr(_main, "_load_k8s_config", lambda: None)
+    monkeypatch.setattr(_main.client, "CustomObjectsApi", lambda: MagicMock())
+    retained_conditions = [
+        {"type": "RetentionHealthy", "status": "False", "reason": "InventoryIncomplete",
+         "message": "Dangling tag", "lastTransitionTime": "2026-09-18T00:00:00Z"},
+        {"type": "CustomHealth", "status": "True"},
+    ]
+    monkeypatch.setattr(_main._crd, "list_vgpu_driver_images", MagicMock(return_value=[{
+        "metadata": {"uid": "owner", "name": "driver"}, "status": {
+            "conditions": [{"type": "Reconciled", "status": "False"}, *retained_conditions],
+            "builds": [{"driverVersion": "550.54.15", "flatcarVersion": "4593.2.0",
+                        "phase": "Pending"}],
+        },
+    }]))
+    patch = MagicMock()
+    monkeypatch.setattr(_main._crd, "patch_status", patch)
+    _main.on_job_event({"object": {"metadata": {"name": "build", "labels": {
+        "vgpu.flatcar.io/owner-uid": "owner", "vgpu.flatcar.io/driver-version": "550.54.15",
+        "vgpu.flatcar.io/flatcar-version": "4593.2.0",
+    }}, "status": job_status}}, MagicMock())
+    conditions = patch.call_args.args[2]["conditions"]
+    assert conditions[1:] == retained_conditions
+    assert conditions[0]["type"] == "Reconciled"
+    assert conditions[0]["status"] == ("True" if job_status.get("succeeded") else "False")

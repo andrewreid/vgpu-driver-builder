@@ -159,7 +159,10 @@ when the registry deliberately has no `authSecretRef`.
 1. **Identify retained Flatcar versions**: all observed node versions, tracked
    channel versions, and explicit `spec.flatcar.versions` pins. Also retain the
    N newest available historical versions below the highest observed node
-   version, according to `keepPreviousFlatcarVersions`. With no observed nodes,
+   version, according to `keepPreviousFlatcarVersions`. CRD-valid suffixes are
+   supported: stable releases sort after suffixed versions with the same numeric
+   core; dot-separated suffix identifiers sort numerically when numeric and
+   lexically otherwise, with numeric identifiers first. With no observed nodes,
    only tracked and pinned versions are required; there is no rollback baseline.
 2. **Inventory image repositories**: inspect runtime and precompiled tags,
    aliases, and nested index references. `repositoryPrecompiled` falls back to

@@ -68,9 +68,9 @@ def repositories(spec: dict) -> list[str]:
 def parse_image_tag(tag: str) -> reconciler.BuildKey | None:
     """Strict retention parser; unrelated tags must never become candidates."""
     match = re.fullmatch(
-        r"(?P<driver>\d+\.\d+(?:\.\d+)?(?:-[A-Za-z][A-Za-z0-9.]*)?)"
+        r"(?P<driver>[0-9]+\.[0-9]+(?:\.[0-9]+)?(?:-[A-Za-z0-9.]+)?)"
         r"(?:-(?P<kernel>\d+\.\d+\.[A-Za-z0-9_.-]+))?"
-        r"-flatcar(?P<flatcar>\d+\.\d+\.\d+)",
+        rf"-flatcar(?P<flatcar>{reconciler.FLATCAR_VERSION_PATTERN})",
         tag,
     )
     if match is None:
@@ -181,7 +181,7 @@ def run(
         )
     try:
         required = current | tracked | pinned
-        if any(not re.fullmatch(r"\d+\.\d+\.\d+", v) for v in required):
+        if any(not re.fullmatch(reconciler.FLATCAR_VERSION_PATTERN, v) for v in required):
             raise ValueError("Invalid required Flatcar version")
         min_age = parse_duration(policy.get("minAgeBeforeDelete", "168h"))
         keep = int(policy.get("keepPreviousFlatcarVersions", 0))

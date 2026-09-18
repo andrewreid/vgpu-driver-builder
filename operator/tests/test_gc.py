@@ -189,7 +189,7 @@ def test_age_boundary_and_no_node_baseline(monkeypatch):
         "junk-flatcarbroken",
         "junk-flatcar4230.2.0",
         "550.54.15-flatcar4230",
-        "550.54.15-flatcar4230.2.0-extra",
+        "550.54.15-flatcar4230.2.0-invalid_suffix",
     ],
 )
 def test_unrelated_and_malformed_tags_preserved(monkeypatch, name):
@@ -334,3 +334,48 @@ def test_delete_disabled_without_success_reports_failure(monkeypatch):
     assert result["retention"]["reason"] == "RegistryDeleteDisabled"
     assert result["retention"]["result"] == "Failed"
     assert result["pruned"] == []
+
+
+@pytest.mark.parametrize("driver", ["550.54.15-1", "550.54.15-123.4", "550.54.15-beta", "550.54"])
+@pytest.mark.parametrize("flatcar", ["4593.2.0-beta", "4593.2.0-custom.12", "4593.2.0-1"])
+@pytest.mark.parametrize("kernel", ["", "-6.12.1-flatcar"])
+def test_crd_valid_version_suffixes_parsed_and_pruned(monkeypatch, driver, flatcar, kernel):
+    name = f"{driver}{kernel}-flatcar{flatcar}"
+    key = gc.parse_image_tag(name)
+    assert key is not None
+    assert key.driver == driver
+    assert key.flatcar == flatcar
+    assert key.precompile == bool(kernel)
+    _, delete = setup_gc(monkeypatch, inventory([(name, OLD)]))
+    result = run({**SPEC, "retention": {"enabled": True}})
+    delete.assert_called_once()
+    assert result["retention"]["result"] == "Succeeded"
+
+
+def test_suffixed_required_versions_and_rollback_remain_protected(monkeypatch):
+    versions = ["4757.2.0-custom", "5000.2.0-beta", "4593.2.0-pin",
+                "4757.2.0-10", "4757.2.0-2", "4230.2.0-legacy"]
+    inv = inventory([(tag(v), OLD) for v in versions])
+    _, delete = setup_gc(monkeypatch, inv)
+    spec = {**SPEC, "flatcar": {"versions": ["4593.2.0-pin"]}}
+    status = {"observedNodes": [{"flatcarVersion": "4757.2.0-custom"}],
+              "trackedChannelVersions": [{"flatcarVersion": "5000.2.0-beta"}]}
+    result = run(spec, status)
+    assert result["retention"]["result"] == "Succeeded"
+    assert set(result["retainedFlatcarVersions"]) == set(versions[:4])
+    assert delete.call_count == 2
+
+
+def test_retention_flatcar_pattern_matches_crd():
+    from pathlib import Path
+    import yaml
+    crd = yaml.safe_load((Path(__file__).resolve().parents[2] /
+        "charts/vgpu-driver-operator/crds/vgpudriverimages.vgpu.flatcar.io.yaml").read_text())
+    properties = crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]
+    pattern = properties["spec"]["properties"]["flatcar"]["properties"]["versions"]["items"]["pattern"]
+    # Both regexes intentionally implement the same accepted language.
+    import re
+    for version in ["4593.2.0", "4593.2.0-beta", "4593.2.0-foo.2", "4593.2.0-1",
+                    "4593.2.0-.", "4593.2.0-a_b", "4593.2", "x4593.2.0", "4593.2.0-"]:
+        assert bool(re.fullmatch(pattern, version)) == bool(
+            re.fullmatch(gc.reconciler.FLATCAR_VERSION_PATTERN, version))
