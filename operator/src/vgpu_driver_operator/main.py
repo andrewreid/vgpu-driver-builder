@@ -11,7 +11,6 @@ imported by ``cli.py`` before ``kopf.run()`` is called.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 from datetime import datetime, timezone
@@ -338,12 +337,24 @@ def _do_reconcile(
     now = datetime.now(tz=timezone.utc)
     now_str = now.isoformat()
     op_ns = _crd.operator_namespace()
+
+    def record_retention(target: dict, reason: str, message: str, *, attempted=False) -> None:
+        enabled = bool((spec.get("retention") or {}).get("enabled"))
+        record = _gc.retention_status(
+            status or {}, now, result="Failed" if attempted else "Skipped",
+            reason=reason if enabled else "Disabled",
+            message=message if enabled else "Retention is disabled", attempted=attempted and enabled,
+        )
+        target["retention"] = record
+        target["conditions"] = [
+            c for c in target.get("conditions", []) if c.get("type") != "RetentionHealthy"
+        ] + [_gc.retention_condition(record, status or {}, now)]
+
     generation = (body.get("metadata") or {}).get("generation", "<unknown>")
     logger.info("reconcile: starting %s generation=%s", name, generation)
 
     core_api = client.CoreV1Api()
     batch_api = client.BatchV1Api()
-    custom_api = client.CustomObjectsApi()
 
     # --- 1. Collect Flatcar versions from nodes ---
     flatcar_cfg: dict = spec.get("flatcar") or {}
@@ -352,6 +363,7 @@ def _do_reconcile(
 
     node_flatcars: set[str] = set()
     observed_nodes: list[dict] = []
+    node_discovery_failed = False
 
     if discover_from_nodes:
         label_selector = ",".join(f"{k}={v}" for k, v in node_selector.items()) or None
@@ -364,6 +376,7 @@ def _do_reconcile(
             nodes = [api_client.sanitize_for_serialization(n) for n in nodes_resp.items]
         except Exception as exc:
             logger.warning("reconcile: failed to list nodes: %s", exc)
+            node_discovery_failed = True
             nodes = []
 
         flatcar_node_counts: dict[str, int] = {}
@@ -414,7 +427,10 @@ def _do_reconcile(
             ),
             "lastTransitionTime": now_str,
         }
-        patch.status.update({"conditions": [no_versions_condition], "observedNodes": observed_nodes})
+        early_status = {"conditions": [no_versions_condition], "observedNodes": observed_nodes}
+        record_retention(early_status, "NodeDiscoveryFailed" if node_discovery_failed
+                         else "NoFlatcarVersions", "Cannot establish required Flatcar versions")
+        patch.status.update(early_status)
         return
 
     desired = _reconciler.compute_desired(
@@ -428,45 +444,53 @@ def _do_reconcile(
     repo_runtime: str = registry_cfg.get("repository", "")
     repo_precompile: str = registry_cfg.get("repositoryPrecompiled", "")
 
-    auth_secret_name: str = (registry_cfg.get("authSecretRef") or {}).get("name", "")
+    auth_ref = registry_cfg.get("authSecretRef")
+    auth_secret_name: str = (auth_ref or {}).get("name", "")
     reg_auth: _registry.RegistryAuth | None = None
-    if auth_secret_name:
-        try:
+    auth_by_repository: dict[str, _registry.RegistryAuth | None] = {}
+    try:
+        dockercfg = None
+        if auth_ref is not None:
+            if not auth_secret_name:
+                raise _registry.RegistryError("authSecretRef requires a Secret name")
             secret_data = _crd.get_secret(core_api, op_ns, auth_secret_name)
-            dockercfg = secret_data.get(".dockerconfigjson") or secret_data.get(
-                "config.json", b""
+            dockercfg = secret_data.get(".dockerconfigjson") or secret_data.get("config.json")
+            if not dockercfg:
+                raise _registry.RegistryError("Registry Secret has no Docker configuration")
+        for repo in _gc.repositories(spec):
+            auth_by_repository[repo] = (
+                _registry.parse_dockerconfigjson(dockercfg, repo.split("/")[0])
+                if dockercfg is not None else None
             )
-            host = repo_runtime.split("/")[0] if repo_runtime else ""
-            if dockercfg and host:
-                reg_auth = _registry.parse_dockerconfigjson(dockercfg, host)
-        except Exception as exc:
-            logger.warning("reconcile: failed to load registry auth: %s", exc)
+    except Exception as exc:
+        message = f"Failed to resolve configured registry authentication: {exc}"
+        early_status = {"observedNodes": observed_nodes, "conditions": [{
+            "type": "Reconciled", "status": "False", "reason": "RegistryAuthFailed",
+            "message": message, "lastTransitionTime": now_str,
+        }]}
+        record_retention(early_status, "RegistryAuthFailed", message)
+        patch.status.update(early_status)
+        logger.warning("reconcile: %s", message)
+        return
 
     active_repo = repo_precompile if (precompile and repo_precompile) else repo_runtime
+    reg_auth = auth_by_repository.get(active_repo)
     existing_tags: set[str] = set()
     if active_repo:
         try:
             existing_tags = _registry.list_tags(active_repo, reg_auth)
-        except _registry.RegistryUnreachable as exc:
-            message = f"Registry unreachable: {exc}"
-            logger.warning("reconcile: %s", message)
-            patch.status.update(
-                {
-                    "observedNodes": observed_nodes,
-                    "conditions": [
-                        {
-                            "type": "Reconciled",
-                            "status": "False",
-                            "reason": "RegistryUnreachable",
-                            "message": message,
-                            "lastTransitionTime": now_str,
-                        }
-                    ],
-                }
-            )
-            return
         except _registry.RegistryError as exc:
-            logger.warning("reconcile: failed to list tags from %s: %s", active_repo, exc)
+            reason = ("RegistryUnreachable" if isinstance(exc, _registry.RegistryUnreachable)
+                      else "RegistryError")
+            message = f"Registry discovery failed: {exc}"
+            early_status = {"observedNodes": observed_nodes, "conditions": [{
+                "type": "Reconciled", "status": "False", "reason": reason,
+                "message": message, "lastTransitionTime": now_str,
+            }]}
+            record_retention(early_status, reason, message)
+            patch.status.update(early_status)
+            logger.warning("reconcile: %s", message)
+            return
 
     # --- 5. Build-job inputs ---
     crd_uid = (body.get("metadata") or {}).get("uid", "")
@@ -666,7 +690,11 @@ def _do_reconcile(
 
     # --- 10. GC (if enabled) ---
     retention: dict = spec.get("retention") or {}
-    if retention.get("enabled") and reg_auth is not None:
+    if not retention.get("enabled"):
+        record_retention(new_status, "Disabled", "Retention is disabled")
+    elif node_discovery_failed:
+        record_retention(new_status, "NodeDiscoveryFailed", "Failed to list cluster nodes")
+    else:
         merged_status = dict(status or {})
         merged_status["observedNodes"] = observed_nodes
 
@@ -681,6 +709,7 @@ def _do_reconcile(
                 spec=spec,
                 status=merged_status,
                 auth=reg_auth,
+                auth_by_repository=auth_by_repository,
                 now=now,
                 logger=logger,
                 emit_event=_emit,
@@ -716,6 +745,15 @@ def _do_reconcile(
             ]
         except Exception as exc:
             logger.warning("reconcile: GC failed: %s", exc)
+            record_retention(new_status, "RetentionFailed", str(exc), attempted=True)
+
+    if retention.get("enabled") and "retention" not in new_status:
+        record_retention(new_status, "RegistryUnreachable", "Retention did not complete",
+                         attempted=True)
+    if "retention" in new_status:
+        new_status["conditions"] = [
+            c for c in new_status["conditions"] if c.get("type") != "RetentionHealthy"
+        ] + [_gc.retention_condition(new_status["retention"], status or {}, now)]
 
     # --- 10. Apply status patch ---
     patch.status.update(new_status)

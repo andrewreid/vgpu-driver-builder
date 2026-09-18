@@ -5,6 +5,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
+
 from vgpu_driver_operator import main as _main
 from vgpu_driver_operator.registry import RegistryUnreachable
 
@@ -424,3 +426,128 @@ def test_reconcile_gc_registry_unreachable_sets_condition(monkeypatch):
         reason="RegistryUnreachable",
         message=condition["message"],
     )
+
+
+@pytest.fixture
+def retention_reconcile(monkeypatch):
+    monkeypatch.setattr(_main, "_load_k8s_config", lambda: None)
+    monkeypatch.setattr(_main._crd, "operator_namespace", lambda: "operator")
+    core = MagicMock()
+    core.list_node.return_value.items = []
+    monkeypatch.setattr(_main.client, "CoreV1Api", lambda: core)
+    monkeypatch.setattr(_main.client, "BatchV1Api", lambda: MagicMock())
+    monkeypatch.setattr(_main._crd, "list_owned_jobs", MagicMock(return_value=[]))
+    monkeypatch.setattr(_main.kopf, "event", MagicMock())
+    monkeypatch.setattr(_main._registry, "list_tags",
+                        MagicMock(return_value={"550.54.15-flatcar4593.2.0"}))
+    from datetime import datetime, timezone
+    from vgpu_driver_operator.registry import ManifestInfo, RepositoryInventory
+    old = datetime(2020, 1, 1, tzinfo=timezone.utc)
+    d1, d2 = "sha256:" + "1"*64, "sha256:" + "2"*64
+    inv = RepositoryInventory(
+        {"550.54.15-flatcar4593.2.0": d1, "550.54.15-6.12.1-flatcar-flatcar4230.2.0": d2},
+        {d1: ManifestInfo(d1, (), old), d2: ManifestInfo(d2, (), old)},
+    )
+    read = MagicMock(return_value=inv)
+    delete = MagicMock()
+    monkeypatch.setattr(_main._registry, "inventory_repository", read)
+    monkeypatch.setattr(_main._registry, "delete_manifest", delete)
+
+    def reconcile(spec=None, status=None):
+        actual = spec if spec is not None else {**_base_spec(), "retention": {"enabled": True}}
+        patch = SimpleNamespace(status={})
+        _main._do_reconcile(spec=actual, name="driver", status=status or {}, patch=patch,
+                            body={"metadata": {"uid": "1", "generation": 1}}, logger=MagicMock())
+        return patch.status
+    return reconcile, core, read, delete
+
+
+def test_anonymous_reconciliation_runs_real_gc(retention_reconcile):
+    reconcile, _, read, delete = retention_reconcile
+    result = reconcile()
+    delete.assert_called_once_with("registry.example.com/vgpu/drivers", "sha256:" + "2"*64, None)
+    assert read.call_count == 2
+    assert result["retention"]["result"] == "Succeeded"
+    assert result["pruned"][0]["tag"].endswith("flatcar4230.2.0")
+    assert result["retainedFlatcarVersions"] == ["4593.2.0"]
+    assert result["conditions"][0]["reason"] == "AllBuildsReady"
+    assert result["conditions"][1]["type"] == "RetentionHealthy"
+    assert result["conditions"][1]["status"] == "True"
+
+
+@pytest.mark.parametrize("secret", [None, {}, {"config.json": b"garbage"},
+                                   {"config.json": b'{"auths":{}}'}])
+def test_configured_auth_failure_never_falls_back(monkeypatch, retention_reconcile, secret):
+    reconcile, _, read, delete = retention_reconcile
+    getter = MagicMock(return_value=secret, side_effect=RuntimeError("missing") if secret is None
+                       else None)
+    monkeypatch.setattr(_main._crd, "get_secret", getter)
+    spec = {**_base_spec(), "retention": {"enabled": True}}
+    spec["registry"]["authSecretRef"] = {"name": "auth"}
+    result = reconcile(spec)
+    assert result["retention"]["reason"] == "RegistryAuthFailed"
+    read.assert_not_called()
+    delete.assert_not_called()
+    _main._registry.list_tags.assert_not_called()
+
+
+def test_authenticated_reconciliation(retention_reconcile, monkeypatch):
+    reconcile, _, read, delete = retention_reconcile
+    monkeypatch.setattr(_main._crd, "get_secret", MagicMock(return_value={"config.json":
+        b'{"auths":{"registry.example.com":{"username":"u","password":"p"}}}'}))
+    spec = {**_base_spec(), "retention": {"enabled": True}}
+    spec["registry"]["authSecretRef"] = {"name": "auth"}
+    assert reconcile(spec)["retention"]["result"] == "Succeeded"
+    assert read.call_args.args[1] == {"username": "u", "password": "p"}
+    assert delete.call_args.args[2] == {"username": "u", "password": "p"}
+
+
+def test_node_discovery_failure_blocks_retention(retention_reconcile):
+    reconcile, core, read, delete = retention_reconcile
+    core.list_node.side_effect = RuntimeError("Kubernetes unavailable")
+    spec = {**_base_spec(), "retention": {"enabled": True}}
+    spec["flatcar"]["discoverFromNodes"] = True
+    result = reconcile(spec)
+    assert result["retention"]["reason"] == "NodeDiscoveryFailed"
+    read.assert_not_called()
+    delete.assert_not_called()
+
+
+@pytest.mark.parametrize("disabled", [False, True])
+def test_retention_early_exit_is_observable(retention_reconcile, disabled):
+    reconcile, _, read, delete = retention_reconcile
+    spec = {**_base_spec(), "retention": {"enabled": not disabled}}
+    if not disabled:
+        spec["flatcar"]["versions"] = []
+    result = reconcile(spec, {"retention": {"lastAttemptTime": "previous"}})
+    assert result["retention"]["reason"] == ("Disabled" if disabled else "NoFlatcarVersions")
+    assert result["retention"]["lastAttemptTime"] == "previous"
+    read.assert_not_called()
+    delete.assert_not_called()
+
+
+
+def test_auth_resolves_each_repository_host(retention_reconcile, monkeypatch):
+    reconcile, _, read, delete = retention_reconcile
+    monkeypatch.setattr(_main._crd, "get_secret", MagicMock(return_value={"config.json":
+        b'{"auths":{"registry.example.com":{"username":"a","password":"one"},'
+        b'"other.example.com":{"username":"b","password":"two"}}}'}))
+    spec = {**_base_spec(), "precompile": True, "retention": {"enabled": True}}
+    spec["registry"].update(authSecretRef={"name": "auth"},
+                            repositoryPrecompiled="other.example.com/precompiled")
+    result = reconcile(spec)
+    assert result["retention"]["result"] == "Succeeded"
+    assert read.call_count == 4
+    read.assert_any_call("other.example.com/precompiled", {"username": "b", "password": "two"})
+    read.assert_any_call("registry.example.com/vgpu/drivers", {"username": "a", "password": "one"})
+
+
+def test_initial_anonymous_api_failure_reports_skipped_retention(retention_reconcile):
+    reconcile, _, read, delete = retention_reconcile
+    from vgpu_driver_operator.registry import RegistryError
+    _main._registry.list_tags.side_effect = RegistryError("403")
+    result = reconcile()
+    assert result["retention"]["reason"] == "RegistryError"
+    assert result["conditions"][1]["status"] == "False"
+    read.assert_not_called()
+    delete.assert_not_called()

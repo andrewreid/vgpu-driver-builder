@@ -154,15 +154,15 @@ spec:
                   properties:
                     keepPreviousFlatcarVersions:
                       description: >
-                        Number of previous Flatcar versions to retain per driver
-                        version (0 = keep none beyond currently active).
+                        Number of available historical Flatcar versions below the
+                        highest observed node version to retain (0 = none).
                       type: integer
                       minimum: 0
                       default: 0
                     minAgeBeforeDelete:
                       description: >
-                        Minimum age a tag must reach before the GC is allowed to
-                        delete it (Go duration string).
+                        Minimum image creation age before deletion. Supports a number
+                        followed by d, h, m, or s (bare numbers are seconds).
                       type: string
                       default: "168h"
                     enabled:
@@ -221,6 +221,33 @@ spec:
                       observedAt:
                         type: string
                         format: date-time
+
+                retention:
+                  description: Outcome of the latest retention evaluation; counts are tags.
+                  type: object
+                  properties:
+                    lastAttemptTime:
+                      type: string
+                      format: date-time
+                    lastSuccessTime:
+                      type: string
+                      format: date-time
+                    result:
+                      type: string
+                      enum: [Succeeded, Skipped, Failed, PartialFailure]
+                    reason:
+                      type: string
+                    message:
+                      type: string
+                    candidateCount:
+                      type: integer
+                      minimum: 0
+                    deletedCount:
+                      type: integer
+                      minimum: 0
+                    skippedCount:
+                      type: integer
+                      minimum: 0
 
                 retainedFlatcarVersions:
                   description: Flatcar versions currently retained by the GC policy.
